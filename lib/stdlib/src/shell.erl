@@ -24,6 +24,7 @@
 -export([start_restricted/1, stop_restricted/0]).
 -export([local_allowed/3, non_local_allowed/3]).
 -export([catch_exception/1, prompt_func/1, strings/1]).
+-export([read_and_add_records/5]).
 
 -define(LINEMAX, 30).
 -define(CHAR_MAX, 60).
@@ -176,7 +177,7 @@ server(StartSync) ->
     end,
     %% Our spawner has fixed the process groups.
     Bs = erl_eval:new_bindings(),
-
+    
     %% Use an Ets table for record definitions. It takes too long to
     %% send a huge term to and from the evaluator. Ets makes it
     %% possible to have thousands of record definitions.
@@ -222,6 +223,7 @@ server(StartSync) ->
     end,
 
     {History,Results} = check_and_get_history_and_results(),
+    group_leader() ! {update_records, RT},
     server_loop(0, start_eval(Bs, RT, []), Bs, RT, [], History, Results).
 
 server_loop(N0, Eval_0, Bs00, RT, Ds00, History0, Results0) ->
@@ -230,7 +232,7 @@ server_loop(N0, Eval_0, Bs00, RT, Ds00, History0, Results0) ->
     {Res,Eval0} = get_command(Prompt, Eval_1, Bs0, RT, Ds0),
 
     case Res of 
-	{ok,Es0} ->
+        {ok,Es0} ->
             case expand_hist(Es0, N) of
                 {ok,Es} ->
                     {V,Eval,Bs,Ds} = shell_cmd(Es, Eval0, Bs0, RT, Ds0, cmd),
@@ -252,24 +254,24 @@ server_loop(N0, Eval_0, Bs00, RT, Ds00, History0, Results0) ->
                     fwrite_severity(benign, <<"~ts">>, [E]),
                     server_loop(N0, Eval0, Bs0, RT, Ds0, History0, Results0)
             end;
-	{error,{Location,Mod,What}} ->
+        {error,{Location,Mod,What}} ->
             fwrite_severity(benign, <<"~s: ~ts">>,
                             [pos(Location), Mod:format_error(What)]),
-	    server_loop(N0, Eval0, Bs0, RT, Ds0, History0, Results0);
-	{error,terminated} ->			%Io process terminated
-	    exit(Eval0, kill),
-	    terminated;
-	{error,interrupted} ->			%Io process interrupted us
-	    exit(Eval0, kill),
-	    {_,Eval,_,_} = shell_rep(Eval0, Bs0, RT, Ds0),
-	    server_loop(N0, Eval, Bs0, RT, Ds0, History0, Results0);
-	{error,tokens} ->			%Most probably character > 255
+            server_loop(N0, Eval0, Bs0, RT, Ds0, History0, Results0);
+        {error,terminated} ->			%Io process terminated
+            exit(Eval0, kill),
+            terminated;
+        {error,interrupted} ->			%Io process interrupted us
+            exit(Eval0, kill),
+            {_,Eval,_,_} = shell_rep(Eval0, Bs0, RT, Ds0),
+            server_loop(N0, Eval, Bs0, RT, Ds0, History0, Results0);
+        {error,tokens} ->			%Most probably character > 255
             fwrite_severity(benign, <<"~w: Invalid tokens.">>, 
                             [N]),
-	    server_loop(N0, Eval0, Bs0, RT, Ds0, History0, Results0);
-	eof ->
+            server_loop(N0, Eval0, Bs0, RT, Ds0, History0, Results0);
+        eof ->
             fwrite_severity(fatal, <<"Terminating erlang (~w)">>, [node()]),
-	    halt()
+            halt()
     end.
 
 get_command(Prompt, Eval, Bs, RT, Ds) ->
@@ -535,47 +537,48 @@ shell_cmd(Es, Eval, Bs, RT, Ds, W) ->
 
 shell_rep(Ev, Bs0, RT, Ds0) ->
     receive
-	{shell_rep,Ev,{value,V,Bs,Ds}} ->
-	    {V,Ev,Bs,Ds};
+        {shell_rep,Ev,{value,V,Bs,Ds}} ->
+            group_leader() ! {update_bindings, Bs},
+            {V,Ev,Bs,Ds};
         {shell_rep,Ev,{command_error,{Location,M,Error}}} ->
             fwrite_severity(benign, <<"~s: ~ts">>,
                             [pos(Location), M:format_error(Error)]),
             {{'EXIT',Error},Ev,Bs0,Ds0};
         {shell_req,Ev,{get_cmd,N}} ->
-	    Ev ! {shell_rep,self(),getc(N)},
-	    shell_rep(Ev, Bs0, RT, Ds0);
-	{shell_req,Ev,get_cmd} ->
-	    Ev ! {shell_rep,self(),get()},
-	    shell_rep(Ev, Bs0, RT, Ds0);
-	{shell_req,Ev,exit} ->
-	    Ev ! {shell_rep,self(),exit},
-	    exit(normal);
-	{shell_req,Ev,{update_dict,Ds}} ->	% Update dictionary
-	    Ev ! {shell_rep,self(),ok},
-	    shell_rep(Ev, Bs0, RT, Ds);
+            Ev ! {shell_rep,self(),getc(N)},
+            shell_rep(Ev, Bs0, RT, Ds0);
+        {shell_req,Ev,get_cmd} ->
+            Ev ! {shell_rep,self(),get()},
+            shell_rep(Ev, Bs0, RT, Ds0);
+        {shell_req,Ev,exit} ->
+            Ev ! {shell_rep,self(),exit},
+            exit(normal);
+        {shell_req,Ev,{update_dict,Ds}} ->	% Update dictionary
+            Ev ! {shell_rep,self(),ok},
+            shell_rep(Ev, Bs0, RT, Ds);
         {ev_exit,{Ev,Class,Reason0}} ->         % It has exited unnaturally
             receive {'EXIT',Ev,normal} -> ok end,
-	    report_exception(Class, Reason0, RT),
+            report_exception(Class, Reason0, RT),
             Reason = nocatch(Class, Reason0),
-	    {{'EXIT',Reason},start_eval(Bs0, RT, Ds0), Bs0, Ds0};
+            {{'EXIT',Reason},start_eval(Bs0, RT, Ds0), Bs0, Ds0};
         {ev_caught,{Ev,Class,Reason0}} ->       % catch_exception is in effect
-	    report_exception(Class, benign, Reason0, RT),
+            report_exception(Class, benign, Reason0, RT),
             Reason = nocatch(Class, Reason0),
             {{'EXIT',Reason},Ev,Bs0,Ds0};
-	{'EXIT',_Id,interrupt} ->		% Someone interrupted us
-	    exit(Ev, kill),
-	    shell_rep(Ev, Bs0, RT, Ds0);
+        {'EXIT',_Id,interrupt} ->		% Someone interrupted us
+            exit(Ev, kill),
+            shell_rep(Ev, Bs0, RT, Ds0);
         {'EXIT',Ev,{Reason,Stacktrace}} ->
             report_exception(exit, {Reason,Stacktrace}, RT),
-	    {{'EXIT',Reason},start_eval(Bs0, RT, Ds0), Bs0, Ds0};
+            {{'EXIT',Reason},start_eval(Bs0, RT, Ds0), Bs0, Ds0};
         {'EXIT',Ev,Reason} ->
             report_exception(exit, {Reason,[]}, RT),
-	    {{'EXIT',Reason},start_eval(Bs0, RT, Ds0), Bs0, Ds0};
-	{'EXIT',_Id,R} ->
-	    exit(Ev, R),
-	    exit(R);
-	_Other ->				% Ignore everything else
-	    shell_rep(Ev, Bs0, RT, Ds0)
+            {{'EXIT',Reason},start_eval(Bs0, RT, Ds0), Bs0, Ds0};
+        {'EXIT',_Id,R} ->
+            exit(Ev, R),
+            exit(R);
+        _Other ->				% Ignore everything else
+            shell_rep(Ev, Bs0, RT, Ds0)
     end.
 
 nocatch(throw, {Term,Stack}) ->
@@ -612,25 +615,25 @@ start_eval(Bs, RT, Ds) ->
 evaluator(Shell, Bs, RT, Ds) ->
     init_dict(Ds),
     case application:get_env(stdlib, restricted_shell) of
-	undefined ->
-	    eval_loop(Shell, Bs, RT);
-	{ok,RShMod} ->
-	    case get(restricted_shell_state) of
-		undefined -> put(restricted_shell_state, []);
-		_ -> ok
-	    end,
-	    put(restricted_expr_state, []),
-	    restricted_eval_loop(Shell, Bs, RT, RShMod)
+        undefined ->
+            eval_loop(Shell, Bs, RT);
+        {ok,RShMod} ->
+            case get(restricted_shell_state) of
+                undefined -> put(restricted_shell_state, []);
+                _ -> ok
+            end,
+            put(restricted_expr_state, []),
+            restricted_eval_loop(Shell, Bs, RT, RShMod)
     end.
 
 eval_loop(Shell, Bs0, RT) ->
     receive
-	{shell_cmd,Shell,{eval,Es},W} ->
+        {shell_cmd,Shell,{eval,Es},W} ->
             Ef = {value, 
                   fun(MForFun, As) -> apply_fun(MForFun, As, Shell) end},
             Lf = local_func_handler(Shell, RT, Ef),
             Bs = eval_exprs(Es, Shell, Bs0, RT, Lf, Ef, W),
-	    eval_loop(Shell, Bs, RT)
+            eval_loop(Shell, Bs, RT)
     end.
 
 restricted_eval_loop(Shell, Bs0, RT, RShMod) ->
@@ -1150,6 +1153,7 @@ read_records(File, Selected, Options) ->
     end.
 
 add_records(RAs, Bs0, RT) ->
+    %% TODO store File name to support type completion
     Recs = [{Name,D} || {attribute,_,_,{Name,_}}=D <- RAs],
     Bs1 = record_bindings(Recs, Bs0),
     case check_command([], Bs1) of
