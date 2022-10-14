@@ -830,6 +830,60 @@ trace_receive(Process* receiver,
     erts_match_set_release_result_trace(NULL, pam_result);
 }
 
+/* Send {trace_ts, Pid, received, Msg, PamResult, Timestamp}
+ * or   {trace_ts, Pid, received, Msg, Timestamp}
+ * or   {trace, Pid, received, Msg, PamResult}
+ * or   {trace, Pid, received, Msg}
+ */
+void
+trace_received(Process* receiver,
+              Eterm from,
+              Eterm msg, ErtsTracingEvent* te)
+{
+    ErtsTracerNif *tnif = NULL;
+    Eterm pam_result;
+
+    if (!te) {
+        te = &erts_receive_tracing[erts_active_bp_ix()];
+        if (!te->on)
+            return;
+    }
+    else ASSERT(te->on);
+
+    if (te->match_spec) {
+        Eterm args[3];
+        Uint32 return_flags;
+        if (is_pid(from)) {
+            args[0] = pid_node_name(from);
+            args[1] = from;
+        }
+        else {
+            ASSERT(is_atom(from));
+            args[0] = from;  /* node name or other atom (e.g 'system') */
+            args[1] = am_undefined;
+        }
+        args[2] = msg;
+        pam_result = erts_match_set_run_trace(NULL, receiver,
+                                              te->match_spec, args, 3,
+                                              ERTS_PAM_TMP_RESULT, &return_flags);
+        if (pam_result == am_false)
+            return;
+        if (ERTS_TRACE_FLAGS(receiver) & F_TRACE_SILENT) {
+            erts_match_set_release_result_trace(NULL, pam_result);
+            return;
+        }
+    } else
+        pam_result = am_true;
+
+    if (is_tracer_enabled(NULL, 0, &receiver->common, &tnif,
+                          TRACE_FUN_E_RECEIVE, am_received)) {
+        send_to_tracer_nif(NULL, &receiver->common, receiver->common.id,
+                           tnif, TRACE_FUN_T_RECEIVE,
+                           am_received, msg, THE_NON_VALUE, pam_result);
+    }
+    erts_match_set_release_result_trace(NULL, pam_result);
+}
+
 int
 seq_trace_update_serial(Process *p)
 {

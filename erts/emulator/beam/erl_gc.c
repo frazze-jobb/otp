@@ -3608,6 +3608,7 @@ erts_process_gc_info(Process *p, Uint *sizep, Eterm **hpp,
     ERTS_DECL_AM(bin_vheap_block_size);
     ERTS_DECL_AM(bin_old_vheap_size);
     ERTS_DECL_AM(bin_old_vheap_block_size);
+    ERTS_DECL_AM(stack_frames);
     Eterm tags[] = {
         /* If you increase the number of elements here, make sure to update
            any call sites as they may have stack allocations that depend
@@ -3624,6 +3625,48 @@ erts_process_gc_info(Process *p, Uint *sizep, Eterm **hpp,
         AM_bin_old_vheap_size,
         AM_bin_old_vheap_block_size
     };
+
+    Eterm list = NIL;
+    UWord object_cnt = 0;
+    //for(Eterm* ep = p->stop; ep < STACK_START(p); ep++){
+    for(Eterm* ep = STACK_START(p)-1; ep >= p->stop; ep--){
+        if(hpp == NULL){
+            if(is_CP(*ep)){
+                ErtsCodeMFA* mfa = erts_find_function_from_pc(*ep);
+                if(mfa == NULL){
+                    continue;
+                }else{
+                    //1 cons cell 2 words
+                    //tuple with mfa 4 words
+                    //wrap tuple of the above 3 word
+                    *sizep += 2+4+3;
+                }
+            }
+        }else{
+            if(is_CP(*ep)){
+                // return tuple of mfa and size
+                ErtsCodeMFA* mfa = erts_find_function_from_pc(*ep);
+                Eterm mfa_tuple;
+                if(mfa == NULL){
+                    continue;
+                }else{
+                    mfa_tuple = TUPLE3(*hpp, mfa->module, mfa->function, make_small(mfa->arity));
+                    *hpp+=4;
+                }
+
+                Eterm mfa_size_tuple = TUPLE2(*hpp, mfa_tuple, make_small(object_cnt));
+                *hpp+=3;
+                list = CONS(*hpp, mfa_size_tuple, list);
+                *hpp+=2;
+            }else{
+                if(primary_tag(*ep) == TAG_PRIMARY_BOXED &&
+                    (*boxed_val(*ep) & _TAG_HEADER_MASK) == _TAG_HEADER_BIN_MATCHSTATE){
+                        continue;
+                    }
+                object_cnt += size_object(*ep);
+            }
+        }
+    } 
     UWord values[] = {
         OLD_HEAP(p) ? OLD_HEND(p) - OLD_HEAP(p) + extra_old_heap_block_size
                     : extra_old_heap_block_size,
@@ -3638,7 +3681,6 @@ erts_process_gc_info(Process *p, Uint *sizep, Eterm **hpp,
         BIN_OLD_VHEAP(p),
         BIN_OLD_VHEAP_SZ(p)
     };
-
     Eterm res = THE_NON_VALUE;
 
     ERTS_CT_ASSERT(sizeof(values)/sizeof(*values) == sizeof(tags)/sizeof(*tags));
@@ -3658,6 +3700,10 @@ erts_process_gc_info(Process *p, Uint *sizep, Eterm **hpp,
            be the same as adding old_heap_block_size + heap_block_size
            + mbuf_size.
         */
+       /*
+       How much data have been processed in the queue since last time we garbage collected?
+
+       */
         ERTS_FOREACH_SIG_PRIVQS(
             p, mp,
             {
@@ -3674,6 +3720,16 @@ erts_process_gc_info(Process *p, Uint *sizep, Eterm **hpp,
                                         sizeof(values)/sizeof(*values),
                                         tags,
                                         values);
+    if(hpp == NULL){
+        // one 2 tuple (3 words)
+        // one cons cell (2 words)
+        *sizep += 5;
+    }else{
+        Eterm tuple = TUPLE2(*hpp, AM_stack_frames, list);
+        *hpp += 3;
+        res = CONS(*hpp, tuple, res);
+        *hpp += 2;
+    }
 
     return res;
 }

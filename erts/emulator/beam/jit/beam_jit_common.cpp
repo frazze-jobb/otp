@@ -1115,6 +1115,11 @@ Sint beam_jit_remove_message(Process *c_p,
                 tok_serial);
     }
 #endif
+    // WHy did it work here and not in the beginning of the function
+    // whenever a peak was done it got received.
+    if (IS_TRACED_FL(c_p, F_TRACE_RECEIVE)){
+        trace_received(c_p, ERL_MESSAGE_FROM(msgp), ERL_MESSAGE_TERM(msgp), NULL);
+    }
     erts_msgq_unlink_msg_set_save_first(c_p, msgp);
     CANCEL_TIMER(c_p);
 
