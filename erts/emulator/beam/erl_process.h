@@ -1630,7 +1630,6 @@ extern int erts_system_profile_ts_type;
 #define F_TRACE_PORTS	     F_TRACE_FLAG(19) /* Ports equivalent to F_TRACE_PROCS */
 #define F_TRACE_SCHED_NO     F_TRACE_FLAG(20) /* Trace with scheduler id */
 #define F_TRACE_SCHED_EXIT   F_TRACE_FLAG(21)
-
 #define F_NUM_FLAGS          (ERTS_TRACE_TS_TYPE_BITS + 22)
 #ifdef DEBUG
 #  define F_INITIAL_TRACE_FLAGS (5 << F_NUM_FLAGS)

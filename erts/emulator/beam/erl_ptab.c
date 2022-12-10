@@ -467,6 +467,7 @@ erts_ptab_init_table(ErtsPTab *ptab,
 			       / ERTS_PTAB_LIST_BIF_TAB_CHUNK_SIZE)
 			      + 1);
 
+	
     if (size == ERTS_PTAB_MAX_SIZE) {
 	int pix;
 	/*
