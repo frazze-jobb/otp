@@ -1,0 +1,48 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+        "name": "(gdb) Launch",
+        "type": "cppdbg",
+        "request": "launch",
+        "program": "${workspaceFolder}/bin/x86_64-pc-linux-gnu/beam.debug.smp",
+        "args": ["--",
+        "-root",    "${workspaceFolder}",
+        "-bindir",  "${workspaceFolder}/bin/x86_64-pc-linux-gnu",
+        "-progname","${workspaceFolder}/bin/cerl -debug",        "--",
+        "-home",    "${workspaceFolder}/..",                            "--",
+        "-kernel",  "shell_history",            "enabled",      "--",
+        "-emu_type","debug","-sname","debug_session_vscode",    "--"],
+        "stopAtEntry": true,
+        "cwd": "${workspaceFolder}",
+        "environment": [
+            {"name": "PATH", "value": "${workspaceFolder}/bin/x86_64-pc-linux-gnu:${workspaceFolder}/bin:/usr/local/bin:/usr/bin"},
+            {"name": "ERL_AFLAGS", "value": "-kernel shell_history enabled"},
+            {"name": "ERL_TOP", "value": "${workspaceFolder}"},
+            {"name": "ERLC_SERVER_ID", "value": "shell_196418"},
+            {"name": "ROOTDIR", "value": "${workspaceFolder}"},
+            {"name": "BINDIR", "value": "${workspaceFolder}/bin/x86_64-pc-linux-gnu"},
+            {"name": "PROGNAME", "value": "${workspaceFolder}/bin/cerl -debug"},
+            {"name": "EMU", "value": "debug"}
+        ],
+        "externalConsole": true,
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/local/bin/gdb",
+        "setupCommands": [
+            {
+                "description": "Enable etp pretty-printing for gdb",
+                "text": "source ${workspaceFolder}/erts/etc/unix/etp_gdb_pp/EtermMIPrettyPrinter.py",
+                "ignoreFailures": true
+            },
+            {
+                "description": "Enable pretty-printing for gdb",
+                "text": "-enable-pretty-printing",
+                "ignoreFailures": true
+            },
+            
+        ],
+        "logging": {
+            "engineLogging": true
+        }
+    }]
+}
