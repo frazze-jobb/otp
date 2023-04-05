@@ -153,10 +153,7 @@
                 insert = false,
                 delete = false,
                 position = <<"\e[6n">>, %% "u7" on my Linux
-                position_reply = <<"\e\\[([0-9]+);([0-9]+)R">>,
-                ansi_regexp = ?ANSI_REGEXP,
-                %% The SGR (Select Graphic Rendition) parameters https://en.wikipedia.org/wiki/ANSI_escape_code#SGR
-                ansi_sgr = <<"^[\e",194,155,"]\\[[0-9;:]*m">>
+                position_reply = <<"\e\\[([0-9]+);([0-9]+)R">>
                }).
 
 -type options() :: #{ tty => boolean(),
@@ -217,7 +214,8 @@ init(UserOptions) when is_map(UserOptions) ->
             UnicodeLocale when is_boolean(UnicodeLocale) ->
                 UnicodeLocale
         end,
-
+    {ok, ANSI_RE_MP} = re:compile(?ANSI_REGEXP, [unicode]),
+    put(ansi_regexp, ANSI_RE_MP),
     init_term(#state{ tty = TTY, unicode = UnicodeMode, options = Options }).
 init_term(State = #state{ tty = TTY, options = Options }) ->
     TTYState =
@@ -802,22 +800,22 @@ insert_buf(State, Bin, LineAcc, Acc) ->
         [$\t | Rest] ->
             insert_buf(State, Rest, [State#state.tab | LineAcc], Acc);
         [$\e | Rest] ->
-            case re:run(Bin, State#state.ansi_regexp, [unicode]) of
-                {match, [{0, N}]} ->
-                    <<Ansi:N/binary, AnsiRest/binary>> = Bin,
-                    case re:run(Bin, State#state.ansi_sgr, [unicode]) of
+            case ansi_sgr(Bin) of
+                none ->
+                    case re:run(Bin, get(ansi_regexp)) of
                         {match, [{0, N}]} ->
-                            %% We include the graphics ansi sequences in the
-                            %% buffer that we step over
-                            insert_buf(State, AnsiRest, [Ansi | LineAcc], Acc);
-                        _ ->
                             %% Any other ansi sequences are just printed and
                             %% then dropped as they "should" not effect rendering
-                            insert_buf(State, AnsiRest, [{ansi, Ansi} | LineAcc], Acc)
-                    end;
-                _ ->
-                    insert_buf(State, Rest, [$\e | LineAcc], Acc)
-            end;
+                            <<Ansi:N/binary, AnsiRest/binary>> = Bin,
+                            insert_buf(State, AnsiRest, [{ansi, Ansi} | LineAcc], Acc);
+                        _ ->
+                            insert_buf(State, Rest, [$\e | LineAcc], Acc)
+                        end;
+                {Ansi, AnsiRest} ->
+                    %% We include the graphics ansi sequences in the
+-                   %% buffer that we step over
+                    insert_buf(State, AnsiRest, [Ansi | LineAcc], Acc)
+        end;
         [NLCR | Rest] when NLCR =:= $\n; NLCR =:= $\r ->
             Tail =
                 if NLCR =:= $\n ->
@@ -864,6 +862,22 @@ insert_buf(State, Bin, LineAcc, Acc) ->
                     insert_buf(State, Rest, ["^" ++ [Char bor 8#40] | LineAcc], Acc)
             end
     end.
+
+% ANSI Select Graphic Rendition parameters:
+%  https://en.wikipedia.org/wiki/ANSI_escape_code#SGR
+% This function replicates this regex pattern <<"^[\e",194,155,"]\\[[0-9;:]*m">>
+% calling re:run/2 nif on compiled regex_pattern was significantly
+% slower than this implementation.
+ansi_sgr(<<N, $[, Bin/binary>>) when N == $\e; N == 194; N == 155 ->
+    ansi_sgr(Bin, <<N, $[>>);
+ansi_sgr(_) -> none.
+
+ansi_sgr(<<M, Bin/binary>>, Acc) when $0 =< M, M =< $; ->
+    ansi_sgr(Bin, <<Acc/binary,M>>);
+ansi_sgr(<<$m, Bin/binary>>, Acc) ->
+    {<<Acc/binary,$m>>, Bin};
+ansi_sgr(_, _) ->
+    none.
 
 -spec to_latin1(erlang:binary()) -> erlang:iovec().
 to_latin1(Bin) ->
