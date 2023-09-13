@@ -334,7 +334,7 @@ get_command(Prompt, Eval, Bs, RT, FT, Ds) ->
                  )
         end,
     Pid = spawn_link(Parse),
-    get_command1(Pid, Eval, Bs, RT, FT, Ds).
+    get_command1(Pid, Eval, Bs, RT, FT, Ds, 10000).
 
 reconstruct(Fun, Name) ->
     lists:flatten(erl_pp:expr(reconstruct1(Fun, Name))).
@@ -365,7 +365,7 @@ reconstruct1([E|Body], Name, Arity) ->
     [E|reconstruct1(Body, Name, Arity)];
 reconstruct1([], _, _) -> [].
 
-get_command1(Pid, Eval, Bs, RT, FT, Ds) ->
+get_command1(Pid, Eval, Bs, RT, FT, Ds, Timeout) ->
     receive
         {shell_state, From} ->
             From ! {shell_state, Bs, RT, FT},
@@ -377,7 +377,14 @@ get_command1(Pid, Eval, Bs, RT, FT, Ds) ->
             get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
         {'EXIT', Eval, Reason} ->
             report_exception(error, {Reason,[]}, RT),
-            get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds)
+            get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
+        {Group, background} -> ok;
+        {Group, interrupt} -> ok    
+    after
+        Timeout ->
+            io:format("This command seem to be taking quite long, you can put it to background or abort it with ctrl+z or ctrl+c"),
+            group_leader() ! {self(), Pid, listen_for_interrupt},
+            get_command1(Pid, Eval, Bs, RT, Ds, infinity)
     end.
 
 prompt(N, Eval0, Bs0, RT, FT, Ds0) ->
@@ -670,6 +677,12 @@ nocatch(error, Reason) ->
 nocatch(exit, Reason) ->
     Reason.
 
+%% If we have support for LLM, then it could get as input the error, and suggest something new
+%% But we probably need to supply some context in the form of previous expressions leading up to this, if they are relevant
+%% (Sources of the Bindings)
+%% A = some_module:some_func("abc"),
+%% B = some_module:some_fault_is_thrown(A),
+%% Then in Bs we probably need to store {'A', "def", "some_module:some_func(\"abc\")"}
 report_exception(Class, Reason, RT) ->
     report_exception(Class, serious, Reason, RT).
 

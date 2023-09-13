@@ -564,6 +564,10 @@ over_to_opening_quote([Stack], [C|Bef], Word) ->
     over_to_opening_quote([Stack], Bef, [C| Word]);
 over_to_opening_quote(_,_,Word) -> {lists:reverse(Word), []}.
 
+matching_paren("\"\"\"","\"\"\"") -> true;
+matching_paren("\"","\"") -> true;
+matching_paren("'","'") -> true;
+matching_paren("<<",">>") -> true;
 matching_paren($(,$)) -> true;
 matching_paren($[,$]) -> true;
 matching_paren(${,$}) -> true;

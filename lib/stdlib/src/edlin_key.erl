@@ -294,7 +294,8 @@ valid_functions() ->
      forward_word,         %% Move forward one word
      history_down,         %% Move to the next item in the history
      history_up,           %% Move to the previous item in the history
-     %%jcl_menu,
+     %%jcl_menu,    %% TODO: let all keys fall through here, and then send it back to user_drv that it should enter
+     %% a new mode
      kill_line,            %% Delete all characters from the cursor to the end of the line and save them in the kill buffer
      kill_word,            %% Delete the word behind the cursor and save it in the kill buffer
      new_line_finish,      %% Add a newline at the end of the line and try to evaluate the current expression

@@ -189,6 +189,12 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                 clear ->
                     Rs = redraw(P, MultiLine, [clear|Rs0]),
                     edit(Cs, P, MultiLine, {normal, none}, Rs);
+                help ->
+                    %% TODO implement in group
+                    %% Should look for module:function that may or may not be completed and output
+                    %% the help for it
+                    {help, chars_before(MultiLine), Cs,{line, P, MultiLine, {help, none}},
+                    reverse(Rs0)};
                 tab_expand ->
                     {expand, chars_before(MultiLine), Cs,
                      {line, P, MultiLine, {tab_expand, none}},
@@ -270,13 +276,17 @@ do_op({search, skip_down}, {_,{Bef, Aft},_LA}, Rs) ->
      [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs]};
 %% do blink after $$
 do_op({blink,C,M}, {_,{[$$,$$|_], _},_} = MultiLine, Rs) ->
+    %% TODO: Dont do blink, if C is inside a quote
     blink(over_paren(chars_before(MultiLine), C, M), C, MultiLine, Rs);
 %% don't blink after a $
 do_op({blink,C,_}, {_,{[$$|_], _},_} = MultiLine, Rs) ->
     do_op({insert,C}, MultiLine, Rs);
 do_op({blink,C,M}, MultiLine, Rs) ->
+    %% TODO: Dont do blink, if C is inside a quote
     blink(over_paren(chars_before(MultiLine), C, M), C, MultiLine, Rs);
 do_op(auto_blink, MultiLine, Rs) ->
+    %% TODO: if a quote, close the quote, and not the paren inside the
+    %% quote
     blink(over_paren_auto(chars_before(MultiLine)), MultiLine, Rs);
 do_op(forward_delete_char, {LB,{Bef, []},[NextLine|LA]}, Rs) ->
     NewLine = {LB, {Bef, NextLine}, LA},
@@ -503,6 +513,7 @@ word_char(_) -> false.
 %% over_white(Cs, Stack, N) ->
 %%     {Cs,Stack,N}.
 
+ 
 %% over_paren(Chars, Paren, Match)
 %% over_paren(Chars, Paren, Match, Depth, N)
 %%  Step over parentheses until matching Paren is found at depth 0. Don't
@@ -550,6 +561,12 @@ over_paren([GC|Cs], Paren, Match, D, N, R, L)  ->
     over_paren(Cs, Paren, Match, D, N+gc_len(GC), R, L);
 over_paren([], _, _, _, _, _, _) ->
     beep.
+
+%% TODO: Add support for <<, ", ', """ and make it more robust i.e. {" hej} ", svej<auto> does not work
+%% look into how edlin_context.erl does it.
+%% If we have odd_quotes of either ', " or """ then we can assume that the next closing paren is a quote
+%% If we do not have odd quotes, then we should go over the parenthesis and upon finding a quote, consume
+%% the whole quoted expression, and then continue with finding parenthesis
 
 over_paren_auto(Chars) ->
     over_paren_auto(Chars, 1, 1, 0, []).
