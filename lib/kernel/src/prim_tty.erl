@@ -917,7 +917,7 @@ in_view(#state{lines_after = LinesAfter, buffer_before = Bef, buffer_after = Aft
     InputAfterRows = (cols_multiline(LinesAfter, W, U) div W),
     %% Dont print lines after if we have expansion rows
     SumRows = InputBeforeRows+ InputRows + ExpandRows + InputAfterRows,
-    if SumRows > R -> 
+    if SumRows > R ->
             RowsLeftAfterInputRows = R - InputRows,
             RowsLeftAfterExpandRows = RowsLeftAfterInputRows - ExpandRows,
             RowsLeftAfterInputBeforeRows = RowsLeftAfterExpandRows - InputBeforeRows,

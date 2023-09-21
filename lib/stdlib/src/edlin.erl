@@ -115,15 +115,19 @@ edit(eof, _, {_,{Bef,Aft0},LA} = L, _, Rs) ->
         _ -> Aft0
     end,
     {done,L,[],reverse(Rs, [{move_combo,-cp_len(Bef), length(LA), cp_len(Aft1)}])};
-edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
+edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode1, EscapePrefix}, Rs0) ->
+    {ShellMode, NextMode} = case ShellMode1 of
+        {_, _}=M -> M;
+        Mode -> {Mode, Mode}
+    end,
     case edlin_key:get_valid_escape_key(Buf, EscapePrefix) of
         {escape_prefix, EscapePrefix1} ->
             case ShellMode of
                 tab_expand -> edit(Buf, P, MultiLine, {normal, none}, Rs0);
-                _ -> edit([], P, MultiLine, {ShellMode, EscapePrefix1}, Rs0)
+                _ -> edit([], P, MultiLine, {NextMode, EscapePrefix1}, Rs0)
             end;
         {invalid, _I, Rest} ->
-            edit(Rest, P, MultiLine, {ShellMode, none}, Rs0);
+            edit(Rest, P, MultiLine, {NextMode, none}, Rs0);
         {insert, C1, Cs2} ->
             %% If its a printable character
             %% we could in theory override it in the keymap,
@@ -136,6 +140,7 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                 normal when C1 =:= $} ->
                     {blink,$},${};
                 normal -> {insert, C1};
+                gpt -> {insert, C1};
                 search when $\s =< C1 ->{insert_search, C1};
                 search -> search_quit;
                 tab_expand -> tab_expand_quit
@@ -149,10 +154,10 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                     case do_op(Op, MultiLine, Rs0) of
                         {blink,N,MultiLine1,Rs} ->
                             edit(Cs2, P, MultiLine1, {blink,N}, Rs);
-                        {redraw, MultiLine1, Rs} ->
-                            edit(Cs2, P, MultiLine1, {ShellMode, none}, redraw(P, MultiLine1, Rs));
-                        {MultiLine1,Rs} ->
-                            edit(Cs2, P, MultiLine1, {ShellMode, none}, Rs)
+                        {redraw, {_LB1, {_Bef1, _Aft1}, _LA1}=MultiLine1, Rs} ->
+                            edit(Cs2, P, MultiLine1, {NextMode, none}, redraw(P, MultiLine1, Rs));
+                        {{_LB1, {_Bef1, _Aft1}, _LA1}=MultiLine1,Rs} ->
+                            edit(Cs2, P, MultiLine1, {NextMode, none}, redraw(P, MultiLine1, Rs))                            
                     end
             end;
         {key, Key, Cs} ->
@@ -167,7 +172,13 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                 {ok, Value0} -> Value0
             end,
             case Value of
+                {mode, Mode1} ->
+                    %erlang:display({mode, {Mode1,ShellMode}, Buf}),
+                    edit(Buf, P, MultiLine, {{Mode1, ShellMode}, none}, Rs0);
                 none -> edit(Cs, P, MultiLine, {normal,none}, Rs0);
+                gpt -> {gpt, Cs, {line, P, MultiLine,{normal, none}}, reverse(Rs0)};
+                gpt_finish -> {gpt_finish, Cs, {line, P, MultiLine,{normal, none}}, reverse(Rs0)};
+                gpt_quit -> {gpt_quit, Cs, {line, P, MultiLine,{normal, none}}, reverse(Rs0)};
                 search -> {search,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 search_found -> {search_found,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 search_cancel -> {search_cancel,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
@@ -177,7 +188,7 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                 history_down -> {history_down,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 new_line ->
                     MultiLine1 = {[lists:reverse(Bef)|LB],{[],Aft},LA},
-                    edit(Cs, P, MultiLine1, {normal, none}, reverse(redraw(P, MultiLine1, Rs0)));
+                    edit(Cs, P, MultiLine1, {NextMode, none}, reverse(redraw(P, MultiLine1, Rs0)));
                 new_line_finish ->
                     % Move to end
                     {{LB1,{Bef1,[]},[]}, Rs1} = do_op(end_of_expression, MultiLine, Rs0),
@@ -185,10 +196,10 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                 redraw_line ->
                     Rs1 = erase_line(Rs0),
                     Rs = redraw(P, MultiLine, Rs1),
-                    edit(Cs, P, MultiLine, {normal, none}, Rs);
+                    edit(Cs, P, MultiLine, {NextMode, none}, Rs);
                 clear ->
                     Rs = redraw(P, MultiLine, [clear|Rs0]),
-                    edit(Cs, P, MultiLine, {normal, none}, Rs);
+                    edit(Cs, P, MultiLine, {NextMode, none}, Rs);
                 help ->
                     %% TODO implement in group
                     %% Should look for module:function that may or may not be completed and output
@@ -216,9 +227,9 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                         {blink,N,MultiLine1,Rs} ->
                             edit(Cs, P, MultiLine1, {blink,N}, Rs);
                         {redraw, MultiLine1, Rs} ->
-                            edit(Cs, P, MultiLine1, {normal, none}, redraw(P, MultiLine1, Rs));
+                            edit(Cs, P, MultiLine1, {NextMode, none}, redraw(P, MultiLine1, Rs));
                         {MultiLine1,Rs} ->
-                            edit(Cs, P, MultiLine1, {ShellMode, none}, Rs)
+                            edit(Cs, P, MultiLine1, {NextMode, none}, Rs)
                     end
             end
     end.
@@ -263,9 +274,9 @@ do_op({insert_search, C}, {LB,{Bef, _Aft},LA}, Rs) ->
 do_op({search, backward_delete_char}, {LB,{[_|Bef], Aft},LA}, Rs) ->
     Offset= cp_len(Aft)+1,
     {{LB, {Bef,Aft}, LA},
-     [{insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs]};
+     [redraw, {insert_chars, unicode, Aft}, {delete_chars,-Offset}|Rs]};
 do_op({search, backward_delete_char}, {LB,{[], Aft},LA}, Rs) ->
-    {{LB, {[],Aft}, LA}, [{insert_chars, unicode, Aft}, {delete_chars,-cp_len(Aft)}|Rs]};
+    {redraw, {LB, {[],Aft}, LA}, [{insert_chars, unicode, Aft}, {delete_chars,-cp_len(Aft)}|Rs]};
 do_op({search, skip_up}, {_,{Bef, Aft},_}, Rs) ->
     Offset= cp_len(Aft),
     {{[],{[$\^R|Bef],Aft},[]}, % we insert ^R as a flag to whoever called us
@@ -297,7 +308,7 @@ do_op(backward_delete_char, {[PrevLine|LB],{[], Aft},LA}, Rs) ->
     NewLine = {LB, {lists:reverse(PrevLine), Aft}, LA},
     {redraw, NewLine,Rs};
 do_op(backward_delete_char, {LB,{[GC|Bef], Aft},LA}, Rs) ->
-    {{LB, {Bef,Aft}, LA},[{delete_chars,-gc_len(GC)}|Rs]};
+    {redraw, {LB, {Bef,Aft}, LA},[{delete_chars,-gc_len(GC)}|Rs]};
 do_op(forward_delete_word, {LB,{Bef, []},[NextLine|LA]}, Rs) ->
     NewLine = {LB, {Bef, NextLine}, LA},
     {redraw, NewLine, Rs};
@@ -305,7 +316,7 @@ do_op(forward_delete_word, {LB,{Bef, Aft0},LA}, Rs) ->
     {Aft1,Kill0,N0} = over_non_word(Aft0, [], 0),
     {Aft,Kill,N} = over_word(Aft1, Kill0, N0),
     put(kill_buffer, reverse(Kill)),
-    {{LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
+    {redraw, {LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
 do_op(backward_delete_word, {[PrevLine|LB],{[], Aft},LA}, Rs) ->
     NewLine = {LB, {lists:reverse(PrevLine), Aft}, LA},
     {redraw, NewLine,Rs};
@@ -313,14 +324,42 @@ do_op(backward_delete_word, {LB,{Bef0, Aft},LA}, Rs) ->
     {Bef1,Kill0,N0} = over_non_word(Bef0, [], 0),
     {Bef,Kill,N} = over_word(Bef1, Kill0, N0),
     put(kill_buffer, Kill),
-    {{LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
+    {redraw, {LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
+do_op(forward_delete_word2, {LB,{Bef, []},[NextLine|LA]}, Rs) ->
+    NewLine = {LB, {Bef, NextLine}, LA},
+    {redraw, NewLine, Rs};
+do_op(forward_delete_word2, {LB,{Bef, Aft0},LA}, Rs) ->
+    {Aft1,Kill0,N0} = over_non_word(Aft0, [], 0),
+    {Aft,Kill,N} = case N0 of
+        0 -> over_word(Aft1, Kill0, N0);
+        _ -> {Aft1,Kill0,N0}
+    end,
+    put(kill_buffer, reverse(Kill)),
+    {{LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
+do_op(backward_delete_word2, {[PrevLine|LB],{[], Aft},LA}, Rs) ->
+    NewLine = {LB, {lists:reverse(PrevLine), Aft}, LA},
+    {redraw, NewLine,Rs};
+do_op(backward_delete_word2, {LB,{Bef0, Aft},LA}, Rs) ->
+    {Bef1,Kill0,N0} = over_non_word(Bef0, [], 0),
+    {Bef,Kill,N} = case N0 of
+        0 -> over_word(Bef1, Kill0, N0);
+        _ -> {Bef1,Kill0,N0}
+    end,
+    put(kill_buffer, Kill),
+    {redraw, {LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
 do_op(transpose_char, {LB,{[C1,C2|Bef], []},LA}, Rs) ->
     Len = gc_len(C1)+gc_len(C2),
-    {{LB, {[C2,C1|Bef],[]}, LA},[{insert_chars_over, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
+    {redraw, {LB, {[C2,C1|Bef],[]}, LA},[{insert_chars_over, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
 do_op(transpose_char, {LB,{[C2|Bef], [C1|Aft]},LA}, Rs) ->
     Len = gc_len(C2),
-    {{LB, {[C2,C1|Bef],Aft}, LA},[{insert_chars_over, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
-do_op(transpose_word, {LB,{Bef0, Aft0},LA}, Rs) ->
+    {redraw, {LB, {[C2,C1|Bef],Aft}, LA},[{insert_chars_over, unicode,[C1,C2]},{move_rel,-Len}|Rs]};
+do_op(transpose_word, {LB,{Bef0, Aft},LA}, Rs) ->
+    {Bef1,Word2,N0} = over_word(Bef0, [], 0),
+    {Bef2,NonWord,N1} = over_non_word(Bef1, [], N0),
+    {Bef3,Word1,N2} = over_word(Bef2, [], N1),
+    TransposedWords = Word2++NonWord++Word1,
+    {redraw,{LB, {reverse(TransposedWords)++Bef3,Aft}, LA},[{insert_chars_over, unicode, TransposedWords}, {move_rel, -N2}|Rs]};
+do_op(transpose_word2, {LB,{Bef0, Aft0},LA}, Rs) ->
     {Aft1,Word2A,N0} = over_word(Aft0, [], 0),
     {Bef, TransposedWords, Aft, N} = case N0 of
         0 -> {Aft2,NonWord,N1} = over_non_word(Aft1, [], 0),
@@ -350,20 +389,36 @@ do_op(transpose_word, {LB,{Bef0, Aft0},LA}, Rs) ->
             {Bef3,Word1,B2} = over_word(Bef2, [], B1),
             {Bef3, Word2B++reverse(Word2A)++NonWord++Word1, Aft1, B2}
     end,
-    {{LB, {reverse(TransposedWords)++Bef, Aft}, LA},[{insert_chars_over, unicode, TransposedWords}, {move_rel, -N}|Rs]};
+    {redraw,{LB, {reverse(TransposedWords)++Bef, Aft}, LA},[{insert_chars_over, unicode, TransposedWords}, {move_rel, -N}|Rs]};
 do_op(kill_word, {LB,{Bef, Aft0},LA}, Rs) ->
     {Aft1,Kill0,N0} = over_non_word(Aft0, [], 0),
     {Aft,Kill,N} = over_word(Aft1, Kill0, N0),
     put(kill_buffer, reverse(Kill)),
-    {{LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
+    {redraw,{LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
 do_op(backward_kill_word, {LB,{Bef0, Aft},LA}, Rs) ->
     {Bef1,Kill0,N0} = over_non_word(Bef0, [], 0),
     {Bef,Kill,N} = over_word(Bef1, Kill0, N0),
     put(kill_buffer, Kill),
-    {{LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
+    {redraw,{LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
+do_op(kill_word2, {LB,{Bef, Aft0},LA}, Rs) ->
+    {Aft1,Kill0,N0} = over_non_word(Aft0, [], 0),
+    {Aft,Kill,N} = case N0 of
+        0 -> over_word(Aft1, Kill0, N0);
+        _ -> {Aft1,Kill0,N0}
+    end,
+    put(kill_buffer, reverse(Kill)),
+    {redraw,{LB, {Bef,Aft}, LA},[{delete_chars,N}|Rs]};
+do_op(backward_kill_word2, {LB,{Bef0, Aft},LA}, Rs) ->
+    {Bef1,Kill0,N0} = over_non_word(Bef0, [], 0),
+    {Bef,Kill,N} = case N0 of
+        0 -> over_word(Bef1, Kill0, N0);
+        _ -> {Bef1,Kill0,N0}
+    end,
+    put(kill_buffer, Kill),
+    {redraw,{LB,{Bef,Aft},LA},[{delete_chars,-N}|Rs]};
 do_op(kill_line, {LB, {Bef, Aft}, LA}, Rs) ->
     put(kill_buffer, Aft),
-    {{LB, {Bef,[]}, LA},[{delete_chars,cp_len(Aft)}|Rs]};
+    {redraw,{LB, {Bef,[]}, LA},[{delete_chars,cp_len(Aft)}|Rs]};
 do_op(clear_line, _, Rs) ->
     {redraw, {[], {[],[]},[]}, Rs};
 do_op(yank, {LB,{Bef, []},LA}, Rs) ->
@@ -371,7 +426,7 @@ do_op(yank, {LB,{Bef, []},LA}, Rs) ->
     {{LB, {reverse(Kill, Bef),[]}, LA},[{insert_chars, unicode,Kill}|Rs]};
 do_op(yank, {LB,{Bef, Aft},LA}, Rs) ->
     Kill = get(kill_buffer),
-    {{LB, {reverse(Kill, Bef),Aft}, LA},[{insert_chars, unicode,Kill}|Rs]};
+    {redraw,{LB, {reverse(Kill, Bef),Aft}, LA},[{insert_chars, unicode,Kill}|Rs]};
 do_op(forward_line, {_,_,[]} = MultiLine, Rs) ->
     {MultiLine, Rs};
 do_op(forward_line, {LB,{Bef, Aft},[AL|LA]}, Rs) ->
@@ -655,9 +710,48 @@ default_multiline_prompt(Pbs) ->
 inverted_space_prompt(Pbs) ->
     "\e[7m" ++ lists:duplicate(prim_tty:npwcwidthstring(Pbs) - 1, $\s) ++ "\e[27m ".
 
-redraw(Pbs, {_,{_,_},_}=L, Rs) ->
-    [{redraw_prompt, Pbs, multi_line_prompt(Pbs), L} |Rs].
+redraw(Pbs, {_LB,{_Bef,_},_}=L, Rs) ->
+    %Command = "python3 /home/efrfred/otp/lib/stdlib/src/colorize_erlang.py '" ++ current_line(L) ++ "'",
+    %erlang:display(current_line(MultiLine1)),
+    %ColorizedCode = os:cmd(Command),
+    %case ColorizedCode of
+    %    ["/bin/sh"|_] -> %%skip coloring
+            [{redraw_prompt, Pbs, multi_line_prompt(Pbs), L} |Rs]. %;
+    %     _ ->
+    %         Lines = string:split(lists:droplast(ColorizedCode), "\n"),
+    %         {LB2_not_reversed, CL, LA2} = case lists:split(length(LB), Lines) of
+    %             {LB2_not_reversed1, [CL1|LA21]} -> {LB2_not_reversed1, CL1,LA21};
+    %             {LB2_not_reversed1, CL1=LA21} ->{LB2_not_reversed1, CL1,LA21}
+    %         end,
+    %         case split(length(Bef), CL) of
+    %             {Bef2_not_reversed, Aft2} -> 
+    %                 LB2 = lists:reverse(LB2_not_reversed),
+    %                 Bef2 = lists:reverse(Bef2_not_reversed),
+    %                 %erlang:display({Bef2_not_reversed,"####", Aft2}),
+    %                 [{redraw_prompt, Pbs, multi_line_prompt(Pbs), {LB2, {Bef2, Aft2}, LA2}} |Rs];
+    %             _ ->[{redraw_prompt, Pbs, multi_line_prompt(Pbs), L} |Rs]
+    %         end
+    % end.
+% split(_, []) -> {[],[]};
+% split(N, String) ->
+%     List = separate_sgr(String),
+%     merge(N, List, []).
 
+% merge(N, [[$\e|_]=SGR | Rest], Acc) ->
+%     %erlang:display({sgr, N, SGR, Acc}),
+%     merge(N, Rest, Acc ++ SGR);
+% merge(0, Rest, Acc) ->
+%     {Acc, lists:join("", Rest)};
+% merge(N, Rest, Acc) when N < 0 ->
+%     %erlang:display({error, N, Rest, Acc}),
+%     {error, Rest, Acc};
+% merge(N, [[_|_]=NonSGR | Rest], Acc) ->
+%     %erlang:display({non, N, NonSGR, Acc}),
+%     merge(N-length(NonSGR), Rest, Acc ++ NonSGR).
+% separate_sgr(String) ->
+%     Pattern = "(\\e\\[[0-9;]*m)|([^\\e]+)",
+%     {match, Matches} = re:run(String, Pattern, [{capture, all, list}, global]),
+%     [Match || [Match|_] <- Matches].
 chars_before({[],{Bef,_},_}) ->
     Bef;
 chars_before({LB,{Bef,_},_}) ->

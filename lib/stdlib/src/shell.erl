@@ -85,12 +85,16 @@ start(NoCtrlG) ->
 
 start(NoCtrlG, StartSync) ->
     _ = code:ensure_loaded(user_default),
+
     Ancestors = [self() | case get('$ancestors') of
                               undefined -> [];
                               Anc -> Anc
                           end],
     spawn(fun() ->
                   put('$ancestors', Ancestors),
+                  put(gpt_conversation, none),
+                  _ = application:ensure_all_started(inets), application:ensure_all_started(ssl), 
+                  shell_gpt:start(),
                   server(NoCtrlG, StartSync)
           end).
 
@@ -221,7 +225,7 @@ server_loop(N0, Eval_0, Bs00, RT, FT, Ds00, History0, Results0) ->
     N = N0 + 1,
     {Eval_1,Bs0,Ds0,Prompt} = prompt(N, Eval_0, Bs00, RT, FT, Ds00),
     {Res,Eval0} = get_command(Prompt, Eval_1, Bs0, RT, FT, Ds0),
-
+    %erlang:display({Res, Eval0}), %% what happens after an exception
     case Res of
         {ok,Es0} ->
             case expand_hist(Es0, N) of
@@ -334,7 +338,8 @@ get_command(Prompt, Eval, Bs, RT, FT, Ds) ->
                  )
         end,
     Pid = spawn_link(Parse),
-    get_command1(Pid, Eval, Bs, RT, FT, Ds, 10000).
+    %get_command1(Pid, Eval, Bs, RT, FT, Ds, 10000).
+    get_command1(Pid, Eval, Bs, RT, FT, Ds).
 
 reconstruct(Fun, Name) ->
     lists:flatten(erl_pp:expr(reconstruct1(Fun, Name))).
@@ -364,8 +369,41 @@ reconstruct1([E|Body], Name, Arity) when is_list(E) ->
 reconstruct1([E|Body], Name, Arity) ->
     [E|reconstruct1(Body, Name, Arity)];
 reconstruct1([], _, _) -> [].
+semantic_error_gpt(Class, Reason, Stacktrace, _Eval, _Bs, RT, _FT, _Ds) ->
+    group_leader() ! {get_latest_cmd, self()},
+    LatestCmd = receive
+        {_GroupLeader, get_latest_cmd, Cmd} -> Cmd;
+        _ -> none
+    end,
+    ConversationId = case get(gpt_conversation) of
+        none -> {ok, ConversationId1} = shell_gpt:setup_semantic_error_conversation(),
+            put(gpt_conversation, ConversationId1),
+            ConversationId1;
+        ConversationId1 -> ConversationId1
+    end,
+    erlang:display(ConversationId),
+    Cs = get(),
+    Cs1 = lists:filter(fun({{command, _},_}) -> true;
+                          ({{result, _},_}) -> true;
+                          (_) -> false
+                       end,
+                       Cs),
+    Cs2 = lists:map(fun({{T, N}, V}) -> {{N, T}, V} end,
+                    Cs1),
+    Cs3 = lists:keysort(1, Cs2),
+    History = lists:flatten(io_lib:format("~ts~n", [lists:flatten(list_commands2(Cs3, RT, []))])),
 
-get_command1(Pid, Eval, Bs, RT, FT, Ds, Timeout) ->
+    Error = lists:flatten(io_lib:format("~p~n", [{Class, {Reason,Stacktrace}}])),
+    case shell_gpt:correct_semantic_error(ConversationId, History, LatestCmd, Error) of
+        {ok, Response, _Usage} ->
+            Output = io_lib:format("\^[[41;37m~ts\^[[0m~n", [Response]),
+            io:requests([{put_chars, latin1, Output}]);
+            %get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
+        Error ->
+            erlang:display({semantic_gpt_error, Error})
+    end.
+%%get_command1(Pid, Eval, Bs, RT, FT, Ds, Timeout) ->
+get_command1(Pid, Eval, Bs, RT, FT, Ds) ->
     receive
         {shell_state, From} ->
             From ! {shell_state, Bs, RT, FT},
@@ -374,17 +412,22 @@ get_command1(Pid, Eval, Bs, RT, FT, Ds, Timeout) ->
             {Res, Eval};
         {'EXIT', Eval, {Reason,Stacktrace}} ->
             report_exception(error, {Reason,Stacktrace}, RT),
+
+            semantic_error_gpt(error, Reason, Stacktrace, Eval, Bs, RT, FT, Ds),
+
             get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
         {'EXIT', Eval, Reason} ->
             report_exception(error, {Reason,[]}, RT),
-            get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
-        {Group, background} -> ok;
-        {Group, interrupt} -> ok    
-    after
-        Timeout ->
-            io:format("This command seem to be taking quite long, you can put it to background or abort it with ctrl+z or ctrl+c"),
-            group_leader() ! {self(), Pid, listen_for_interrupt},
-            get_command1(Pid, Eval, Bs, RT, Ds, infinity)
+            semantic_error_gpt(error, Reason, [], Eval, Bs, RT, FT, Ds),
+            %erlang:display({Eval,{error, {Reason}}, check_and_get_history_and_results()}),
+            get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds)
+        %{Group, background} -> ok;
+        %{Group, interrupt} -> ok    
+    % after
+    %     Timeout ->
+    %         io:format("This command seem to be taking quite long, you can put it to background or abort it with ctrl+z or ctrl+c"),
+    %         group_leader() ! {self(), Pid, listen_for_interrupt},
+    %         get_command1(Pid, Eval, Bs, RT, Ds, infinity)
     end.
 
 prompt(N, Eval0, Bs0, RT, FT, Ds0) ->
@@ -647,10 +690,12 @@ shell_rep(Ev, Bs0, RT, FT, Ds0) ->
         {ev_exit,{Ev,Class,Reason0}} ->         % It has exited unnaturally
             receive {'EXIT',Ev,normal} -> ok end,
             report_exception(Class, Reason0, RT),
+            semantic_error_gpt(Class, Reason0, [], Ev, Bs0, RT, FT, Ds0),
             Reason = nocatch(Class, Reason0),
             {{'EXIT',Reason},start_eval(Bs0, RT, FT, Ds0), Bs0, Ds0};
         {ev_caught,{Ev,Class,Reason0}} ->       % catch_exception is in effect
             report_exception(Class, benign, Reason0, RT),
+            semantic_error_gpt(Class, Reason0, [], Ev, Bs0, RT, FT, Ds0),
             Reason = nocatch(Class, Reason0),
             {{'EXIT',Reason},Ev,Bs0,Ds0};
         {'EXIT',_Id,interrupt} ->               % Someone interrupted us
@@ -658,9 +703,11 @@ shell_rep(Ev, Bs0, RT, FT, Ds0) ->
             shell_rep(Ev, Bs0, RT, FT, Ds0);
         {'EXIT',Ev,{Reason,Stacktrace}} ->
             report_exception(exit, {Reason,Stacktrace}, RT),
+            semantic_error_gpt(exit, Reason, Stacktrace, Ev, Bs0, RT, FT, Ds0),
             {{'EXIT',Reason},start_eval(Bs0, RT, FT, Ds0), Bs0, Ds0};
         {'EXIT',Ev,Reason} ->
             report_exception(exit, {Reason,[]}, RT),
+            semantic_error_gpt(exit, Reason, [], Ev, Bs0, RT, FT, Ds0),
             {{'EXIT',Reason},start_eval(Bs0, RT, FT, Ds0), Bs0, Ds0};
         {'EXIT',_Id,R} ->
             exit(Ev, R),
@@ -1090,6 +1137,21 @@ local_func(h, [], Bs, Shell, RT, _FT, _Lf, _Ef) ->
                     Cs1),
     Cs3 = lists:keysort(1, Cs2),
     {value,list_commands(Cs3, RT),Bs};
+% local_func(llm, [], Bs, Shell, RT, _FT, _Lf, _Ef) ->
+    % Cs = shell_req(Shell, get_cmd),
+    % Cs1 = lists:filter(fun({{command, _},_}) -> true;
+    %                       ({{result, _},_}) -> true;
+    %                       (_) -> false
+    %                    end,
+    %                    Cs),
+    % Cs2 = lists:map(fun({{T, N}, V}) -> {{N, T}, V} end,
+    %                 Cs1),
+    % Cs3 = lists:keysort(1, Cs2),
+    % %%{value,list_commands(Cs3, RT),Bs};
+    % %% send commands to LLM client
+    % %% receive results from LLM
+    % %% output is somewhere, 
+    % ;
 local_func(b, [], Bs, _Shell, RT, _FT, _Lf, _Ef) ->
     {value,list_bindings(erl_eval:bindings(Bs), RT),Bs};
 local_func(f, [], _Bs, _Shell, _RT, _FT, _Lf, _Ef) ->
@@ -1533,6 +1595,22 @@ list_commands([_D|Ds], RT) ->
     list_commands(Ds, RT);
 list_commands([], _RT) -> ok.
 
+list_commands2([{{N,command},Es0}, {{N,result}, V} |Ds], RT, Acc) ->
+    Es = prep_list_commands(Es0),
+    VS = pp(V, 4, RT),
+    Ns = io_lib:format("~w: ", [N]),
+    I = iolist_size(Ns),
+    Acc1 = Acc ++ io_lib:format("~ts~ts\n-> ~ts\n", [Ns, erl_pp:exprs(Es, I, enc()), VS]),
+    list_commands2(Ds, RT, Acc1);
+list_commands2([{{N,command},Es0} |Ds], RT, Acc) ->
+    Es = prep_list_commands(Es0),
+    Ns = io_lib:format("~w: ", [N]),
+    I = iolist_size(Ns),
+    Acc1 = Acc ++ io_lib:format("~ts~ts\n", [Ns, erl_pp:exprs(Es, I, enc())]),
+    list_commands2(Ds, RT, Acc1);
+list_commands2([_D|Ds], RT, Acc) ->
+    list_commands2(Ds, RT, Acc);
+list_commands2([], _RT, Acc) -> Acc.
 list_bindings([{Name,Val}|Bs], RT) ->
     case erl_eval:fun_data(Val) of
         {fun_data,_FBs,FCs0} ->

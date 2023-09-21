@@ -118,6 +118,7 @@ MODULES= \
 	random \
 	sets \
 	shell \
+	shell_gpt \
 	shell_default \
 	shell_docs \
 	slave \

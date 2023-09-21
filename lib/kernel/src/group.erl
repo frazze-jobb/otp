@@ -47,6 +47,7 @@ server(Ancestors, Drv, Shell, Options) ->
     put(line_buffer, proplists:get_value(line_buffer, Options, group_history:load())),
     put(read_mode, list),
     put(user_drv, Drv),
+    put(gpt_conversation, none),
     ExpandFun = normalize_expand_fun(Options, fun edlin_expand:expand/2),
     put(expand_fun, ExpandFun),
     put(echo, proplists:get_value(echo, Options, true)),
@@ -124,6 +125,9 @@ server_loop(Drv, Shell, Buf0) ->
             %% selective receive loops elsewhere in this module.
             Buf = io_request(Req, From, ReplyAs, Drv, Shell, Buf0),
             ?MODULE:server_loop(Drv, Shell, Buf);
+        {get_latest_cmd, Pid} ->
+            Pid ! {self(), get_latest_cmd, get(latest_cmd)},
+            ?MODULE:server_loop(Drv, Shell, Buf0);
         {reply,{From,ReplyAs},Reply} ->
             io_reply(From, ReplyAs, Reply),
 	    ?MODULE:server_loop(Drv, Shell, Buf0);
@@ -531,6 +535,7 @@ get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
             end,
             _ = case {M,F} of
                     {io_lib, get_until} ->
+                        put(latest_cmd, string:trim(Line, both)),
                         save_line_buffer(string:trim(Line, both)++"\n", get_lines(new_stack(get(line_buffer))));
                     _ ->
                         skip
@@ -646,8 +651,97 @@ get_line1({search,Cs,Cont,Rs}, Drv, Shell, Ls, Encoding) ->
     %% prompt ('N>') and substitute it with the search prompt.
     put(search_quit_prompt, Cont),
     Pbs = prompt_bytes("\033[;1;4msearch:\033[0m ", Encoding),
-    {more_chars,Ncont,_Nrs} = edlin:start(Pbs, {search,none}),
+    send_drv_reqs(Drv, edlin:erase_line()),
+    {more_chars,Ncont,Nrs} = edlin:start(Pbs, {search,none}),
+    send_drv_reqs(Drv, Nrs),
     get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+get_line1({gpt, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    send_drv_reqs(Drv, Rs),
+    case get(gpt_conversation) of
+        none ->
+            {ok, ConversationId1} = shell_gpt:setup_help_conversation(),
+            put(gpt_conversation, ConversationId1),
+            ConversationId1;
+        ConversationId1 -> ConversationId1
+    end,
+    put(gpt_quit_prompt, Cont),
+    Pbs = prompt_bytes("\033[;1;4mgpt:\033[0m ", Encoding),
+    %% Setup a conversation
+    send_drv_reqs(Drv, edlin:erase_line()),
+    {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
+    send_drv_reqs(Drv, Nrs),
+    %% Todo: start a new gpt conversation with a generic system prompt
+    %% Nothing more to do here, the magic happens in gpt_finish
+    %% While waiting for response, it should say processing()
+    %% group keeps track of the current conversation
+    %% Should you be able to read previous messages in the conversation? All messages are written to a conversation file, and each
+    %% belonging to a specific conversation are colored the same in the main window and a conversation number is displayed.
+    %% But the conversation files are not loaded upon restart of the shell.
+    get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+get_line1({gpt_finish, _Cs, {line, _, LineCont, _}, Rs}, Drv, Shell, Ls, Encoding) ->
+    send_drv_reqs(Drv, Rs),
+    %% This should send the current expression to the gpt_server asynchronously, and the gpt_server should respond with 
+    %% put_chars request via the io: module.
+    %% The user can then enter gpt mode again and press alt+enter on the empty line which should then take the latest response from the
+    %% server and extract the next prompt from it.
+    ConversationId = get(gpt_conversation),
+    case LineCont of
+        {[],{[],[]},[]} -> %% Extract some code from the latest response
+            erlang:display({linecont, LineCont}),
+            case shell_gpt:extract_code(ConversationId) of
+                {ok, Code} -> 
+                    Prompt = edlin:prompt(get(gpt_quit_prompt)),
+                    LineCont1 = case Code of
+                        [] -> {[],{[],[]},[]};
+                        _ -> [Last| LB] = lists:reverse(Code),
+                             {LB, {lists:reverse(Last),[]},[]}
+                    end,
+                    send_drv_reqs(Drv, edlin:erase_line()),
+                    send_drv_reqs(Drv, edlin:redraw_line({line, Prompt, LineCont1, {normal, none}})),
+                    get_line1({done, LineCont1, "\n", Rs}, Drv, Shell, Ls, Encoding);
+                _Error ->
+                    NCont = get(gpt_quit_prompt),
+                    send_drv_reqs(Drv, [delete_line|Rs]),
+                    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
+                    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding)
+            end;
+        _ -> %% Send the current expression to the gpt_server
+            erlang:display({gpt, ConversationId, edlin:current_line(LineCont)}),
+            case shell_gpt:ask_for_help(ConversationId, edlin:current_line(LineCont)) of
+                {ok, Response, _Usage} ->
+                    NCont = get(gpt_quit_prompt),
+                    send_drv_reqs(Drv, [new_prompt]),
+                    %% TODO: make output pretty with asci box characters and only color the box
+                    %% Also put a box around the input query with a different color?
+                    send_drv_reqs(Drv, [{put_chars, unicode, unicode:characters_to_binary("\^[[44;37m"++Response++"\^[[0m\n")}]),
+                    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
+                    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
+                Error ->
+                    NCont = get(gpt_quit_prompt),
+                    send_drv_reqs(Drv, {put_chars, unicode, unicode:characters_to_binary("Error from gpt_server")}),
+                    erlang:display(Error),
+                    send_drv_reqs(Drv, [delete_line|Rs]),
+                    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
+                    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding)
+            end
+    end;
+get_line1({gpt_cancel, _Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    NCont = get(gpt_quit_prompt),
+    send_drv_reqs(Drv, [delete_line|Rs]),
+    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
+    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
+get_line1({gpt_quit, _Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    %% Should you be able to go back to the conversation we quit? Yes
+    NCont = get(gpt_quit_prompt),
+    send_drv_reqs(Drv, [delete_line|Rs]),
+    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
+    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
+%get_line1({gpt_new_conversation, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    %% Should you be able to start a new conversation? Yes
+%    get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+%get_line1({gpt_switch_conversation, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    %% Should you be able to switch to a previous conversation? Yes
+ %   get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
 get_line1({Expand, Before, Cs0, Cont,Rs}, Drv, Shell, Ls0, Encoding)
   when Expand =:= expand; Expand =:= expand_full ->
     send_drv_reqs(Drv, Rs),

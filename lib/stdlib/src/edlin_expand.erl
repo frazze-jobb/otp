@@ -721,7 +721,7 @@ print_function_head1(Mod, Fun, Par, _Ret) ->
                                         {ann_type, {var, V}, _T} -> atom_to_list(V);
                                         T -> edlin_type_suggestion:print_type(T, [], [{first_only, true}])
                                     end || {_N,P} <- lists:enumerate(Par)])++")",
-    Str ++" -> " ++ edlin_type_suggestion:print_type(_Ret, [], [{first_only, true}]. %% TODO Test
+    Str ++" -> " ++ edlin_type_suggestion:print_type(_Ret, [], [{first_only, true}]). %% TODO Test
 
 print_function_head_from_type(Mod, Fun, FunType, FT) ->
     case edlin_type_suggestion:type_tree(list_to_atom(Mod), FunType, [], FT) of

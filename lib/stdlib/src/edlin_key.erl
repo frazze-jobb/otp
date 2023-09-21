@@ -166,7 +166,20 @@ key_map() -> #{
         tab_expand => #{
             "\t" => tab_expand_full,
             default => tab_expand_quit %% go to normal mode and evaluate key input again
+        },
+        gpt => #{
+            "\t" => tab_expand, %% TODO add support for autocomplete in plain text i.e. hej lis<tab> -> hej list or hej > lists 
+            "\n" => new_line,
+            "\r" => new_line,
+            "\^[\n" => gpt_finish,
+            "\^[\r" => gpt_finish,
+            "\^[c" => gpt_quit,
+            ")" => none,
+            "]" => none,
+            "}" => none,
+            default => {mode, normal}  %% when a {mode, normal} take the same keybindings as for the specified mode
         }
+
     }.
 
 normal_map() ->
@@ -214,6 +227,7 @@ normal_map() ->
         "\^[d" => kill_word,
         "\^[F" => forward_word,
         "\^[f" => forward_word,
+        "\^[g" => gpt,
         "\^[L" => redraw_line,
         "\^[l" => redraw_line,
         "\^[o" => open_editor,
