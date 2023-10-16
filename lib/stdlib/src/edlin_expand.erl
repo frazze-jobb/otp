@@ -73,22 +73,47 @@ expand(Bef0, Opts) ->
                          #shell_state{bindings=[],records=[],functions=[]}
                  end,
     expand(Bef0, Opts, ShellState).
+remove_comments(CodeStr) ->
+    %CommentPattern = ".|^(%[^\\n])*",
+    CommentPattern = "%[^\\n]*",
+    re:replace(CodeStr, CommentPattern, "", [global, {return, list}]).
 
+find(CodeStr) ->
+    NoCommentsStr = remove_comments(CodeStr),
+    Pattern = "([A-Z][a-zA-Z0-9_]*)",
+
+    %% Find all matches of the Pattern in the NoCommentsStr
+    case re:run(NoCommentsStr, Pattern, [global, {capture,all_but_first,list}]) of
+        {match, Matches} -> 
+            %% Since Matches now is a list of all non-overlapping occurrences of Pattern
+            %% We flatten the list to get individual matches and then remove duplicates
+            lists:usort(Matches);
+        nomatch -> []
+    end.
 %% Only used for testing
 expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
     LegacyOutput = proplists:get_value(legacy_output, Opts, false),
+    Aft = proplists:get_value('after', Opts, []),
     {_Bef1, Word} = over_word(Bef0),
     {Res, Expansion, Matches} = case edlin_context:get_context(Bef0) of
+                 {string, {map, Binding, Keys}} -> erlang:display(yes),fold_results([expand_map(Word, Bs, Binding, Keys), expand_string(Bef0)]);
+                 {string, _} -> expand_string(Bef0);
 
-                 {string} -> expand_string(Bef0);
-
-                 {binding} -> expand_binding(Word, Bs);
+                 {binding} ->
+                    %% Find Bindings earlier on the line, and allow them in the suggestion as well
+                    %% but only upto the function scope...
+                    %% for now we can just support a prototype
+                    BsX = lists:map(fun([X])->{list_to_atom(X), undefined} end, find(lists:reverse(_Bef1))),
+                    Bs1 = Bs ++ BsX,
+                    expand_binding(Word, Bs1);
 
                  {term} -> expand_module_function(Bef0, FT);
-                 {term, _, {_, Unfinished}} -> expand_module_function(lists:reverse(Unfinished), FT);
+                 {term, _, {_, Unfinished}} -> 
+                    expand_module_function(lists:reverse(Unfinished), FT);
                  {error, _Column} ->
                     {no, [], []};
                  {function} -> expand_module_function(Bef0, FT);
+                 {function, _Mod} -> expand_module_function(Bef0, FT);
                  {fun_} -> expand_module_function(Bef0, FT);
 
                  {fun_, Mod} -> expand_function_name(Mod, Word, "/", FT);
@@ -117,8 +142,42 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                             fold_results([FunExpansion] ++ ModuleOrBifs ++ [Functions])
                     end;
 
+                 {map, [], Keys} ->
+                    %% Check for pattern match map
+                    {[$}|Aft1], _} = over_word(Aft),
+                    {[$=|Aft2], _} = over_word(Aft1),
+                    {_, _Var} = over_word(Aft2),
+                    Var = lists:reverse(_Var),
+                    case Bs of
+                        [] -> {no, [], []};
+                        _ ->
+                            case proplists:get_value(list_to_atom(Var), Bs) of
+                                Map when is_map(Map) ->
+                                    K1 = sets:from_list(maps:keys(Map)),
+                                    K2 = sets:subtract(K1, sets:from_list([list_to_atom(K) || K <- Keys])),
+                                    match(Word, sets:to_list(K2), ":=?");
+                                _ -> {no, [], []}
+                            end
+                    end;
+
+                 %% lets call this a patternmatch completion
+                 %% output the completion, and after we need to output navigation events back to 
+                    %% Strategy, either we suggest closing of the map and add = to the end, when thats done
+                    %% we can suggest a Binding, and once the Binding is finished, we jump back into the map
+                    %% and then we do the second strategy
+                    %% Check if there is a binding on the right side of the map to match against,
+                    %% suggest keys based on that binding
+                    %% #{|} = #{a => 1, b => 2} = Binding, easy, just match against the right most Binding
+                    %% #{|} = #{a => 1, b => 2}, easy, just match against the right side map
+                    %% #{|} = Binding, easy, just match against the right side Binding
+                    %% #{|} = #{a => 1, b => 2} = \n we could jump to the end and suggest a binding but hard to jump back
+                    %% 
+                    %% = Binding
+                    
                  %% Complete an unfinished key or suggest valid keys of a map binding
-                 {map, Binding, Keys} -> expand_map(Word, Bs, Binding, Keys);
+                 {map, Binding, Keys} ->
+                    %% If we now its a Map, and we have 
+                    expand_map(Word, Bs, Binding, Keys);
 
                  {map_or_record} ->
                      {[$#|Bef2], _} = over_word(Bef0),
@@ -141,15 +200,36 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                      end;
 
                  {record} -> expand_record(Word, RT);
+                 {record, Mod} ->
+                    %% In theory, we should now what the name of the record should be
+                    %% in function completion.. Maybe we can use that to make a more
+                    %% robust expansion
+                    case expand_record(Word, RT) of
+                        {_Res,[],[]} ->
+                            %% TODO:
+                            %% Record in RT?
+                            %% We don't want to read the record everytime
+                            %% But with this logic, we need to first fail
+                            %% to find matches in RT before reading from Mod
+                            %% and their might be records that are similar in
+                            %% name so typing a non existant record first may be cumbersome
+                            shell:read_and_add_records(list_to_atom(Mod)),
+                            #shell_state{bindings = _, records = RT1, functions = _} = shell:get_state(),
+                            expand_record(Word, RT1);
+                        Matches2 -> Matches2
+                    end;
+                 {record, Mod, Record, Fields, FieldToComplete, Args, Unfinished, Nestings} ->
+                    %% Record in RT?
+                    RT1 = case proplists:is_defined(Record, RT) of
+                        true -> RT;
+                        false -> shell:read_and_add_records(list_to_atom(Mod)),
+                                 #shell_state{bindings = _, records = NewRT, functions = _} = shell:get_state(),
+                                 NewRT
+                    end,
+                    expand_record_fields(FieldToComplete, Unfinished, Record, Fields, RT1, Args, Nestings, FT);
 
                  {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings} ->
-                     RecordExpansion = expand_record_fields(FieldToComplete, Unfinished, Record, Fields, RT, Args, Nestings, FT),
-                     case Word of
-                         [] -> RecordExpansion;
-                         _ ->
-                             ModuleOrBifs = expand_helper(FT, module,Word,":"),
-                             fold_results([RecordExpansion] ++ ModuleOrBifs)
-                     end;
+                     expand_record_fields(FieldToComplete, Unfinished, Record, Fields, RT, Args, Nestings, FT);
                  _ -> {no, [], []}
 
              end,
@@ -204,7 +284,12 @@ expand_record_fields(FieldToComplete, Word, Record, Fields, RT, _Args, Nestings,
         [RecordType|_] ->
             case sets:is_element(FieldToComplete2, FieldSet2) of
                 true ->
-                    expand_record_field_content(FieldToComplete2, RecordType, Word1, Nestings, FT);
+                    RecordExpansion = expand_record_field_content(FieldToComplete2, RecordType, Word1, Nestings, FT),
+                    case Word1 of
+                        [] -> RecordExpansion;
+                        _ -> ModuleOrBifs = expand_helper(FT, module,Word1,":"),
+                             fold_results([RecordExpansion] ++ ModuleOrBifs)
+                    end;
                 false ->
                     expand_record_field_name(Record2, FieldSet2, RecordType, Word1)
             end;
@@ -381,17 +466,17 @@ add_to_last_nesting(Term, Nesting) ->
         {map, F, Fs, Args, U} ->
             List ++ [{map, F, Fs, Args ++ [Term], U}]
     end.
-
-close_nesting(Nesting) ->
-    Last = lists:last(Nesting),
-    case Last of
-        {tuple, _Args, _} ->
-            "}";
-        {list, _Args, _} ->
-            "]";
-        {map, _F, _Fs, _Args, _} ->
-            "}"
-    end.
+%This functionality often interfere with the completion, see other comment
+% close_nesting(Nesting) ->
+%     Last = lists:last(Nesting),
+%     case Last of
+%         {tuple, _Args, _} ->
+%             "}";
+%         {list, _Args, _} ->
+%             "]";
+%         {map, _F, _Fs, _Args, _} ->
+%             "}"
+%     end.
 expand_function_parameter_type(Mod, MFA, FunType, Args, Unfinished, Nestings, FT) ->
     TypeTree = edlin_type_suggestion:type_tree(Mod, FunType, Nestings, FT),
 
@@ -465,17 +550,18 @@ expand_function_parameter_type(Mod, MFA, FunType, Args, Unfinished, Nestings, FT
                                                                      false ->")"
                                                                  end,
                                                             Atoms1 = edlin_type_suggestion:get_atoms(Constraints1, T, Nestings),
-                                                            {Res1, Expansion1, Matches1} = match(Word, Atoms1, CC),
-                                                            case Matches1 of
-                                                                [] ->
-                                                                    case match_arguments(TypeTree, Args ++ [Unfinished]) of
-                                                                        false -> {Res1, Expansion1, Matches1};
-                                                                        true ->
-                                                                            {yes, CC, [{CC, []}]}
-                                                                    end;
-                                                                _ ->
-                                                                    {Res1, Expansion1, Matches1}
-                                                            end
+                                                            %{Res1, Expansion1, Matches1} = 
+                                                            match(Word, Atoms1, CC)
+                                                            % case Matches1 of
+                                                            %     [] ->
+                                                            %         case match_arguments(TypeTree, Args ++ [Unfinished]) of
+                                                            %             false -> {Res1, Expansion1, Matches1};
+                                                            %             true ->
+                                                            %                 {yes, CC, [{CC, []}]}
+                                                            %         end;
+                                                            %     _ ->
+                                                            %         {Res1, Expansion1, Matches1}
+                                                            % end
                                                         end,
                             Match1 = case Matches of
                                          [] -> [];
@@ -489,7 +575,7 @@ expand_function_parameter_type(Mod, MFA, FunType, Args, Unfinished, Nestings, FT
             end
     end.
 expand_nesting_content(T, Constraints, Nestings, Section) ->
-    {NestingType, UnfinishedNestingArg, NestingArgs} = case lists:last(Nestings) of
+    {NestingType, UnfinishedNestingArg, _NestingArgs} = case lists:last(Nestings) of
                                               {tuple, NestingArgs1, Unfinished1} -> {tuple, Unfinished1, NestingArgs1};
                                               {list, NestingArgs1, Unfinished1} -> {list, Unfinished1, NestingArgs1};
                                               {map, _, _, NestingArgs1, Unfinished1} -> {map, Unfinished1, NestingArgs1}
@@ -529,16 +615,19 @@ expand_nesting_content(T, Constraints, Nestings, Section) ->
                                                 fold_results([begin
                                                                   case NestingArity of
                                                                       none -> {no, [], []};
-                                                                      _ when NestingType =:= tuple ->
-                                                                          CC = case length(NestingArgs)+1 < NestingArity of
-                                                                                   true -> ", ";
-                                                                                   false -> close_nesting(Nestings)
-                                                                               end,
-                                                                          {yes, CC, [{CC, []}]};
-                                                                      _ when NestingType =:= list ->
-                                                                        {no, [], [{", ", []}, {"]", []}]};
-                                                                      _ when NestingType =:= map ->
-                                                                        {no, [], [{", ",[]},{"}", []}]};
+                                                                    % This functionality often interfere with the
+                                                                    % completion of an atom, either by adding comma on an unfinished atom
+                                                                    % or preventing a module to be completed because there could also be a comma
+                                                                    %   _ when NestingType =:= tuple ->
+                                                                    %       CC = case length(NestingArgs)+1 < NestingArity of
+                                                                    %                true -> ", ";
+                                                                    %                false -> close_nesting(Nestings)
+                                                                    %            end,
+                                                                    %       {yes, CC, [{CC, []}]};
+                                                                    %   _ when NestingType =:= list ->
+                                                                    %     {no, [], [{", ", []}, {"]", []}]};
+                                                                    %   _ when NestingType =:= map ->
+                                                                    %     {no, [], [{", ",[]},{"}", []}]};
                                                                       _ -> 
                                                                         {no, [], []}
                                                                   end
@@ -549,12 +638,12 @@ expand_nesting_content(T, Constraints, Nestings, Section) ->
                                                 fold_results([begin
                                                                   case NestingArity of
                                                                       none -> {no, [], []};
-                                                                      _ when NestingType =:= tuple ->
-                                                                          CC = case length(NestingArgs)+1 < NestingArity of
-                                                                                   true -> ", ";
-                                                                                   false -> close_nesting(Nestings)
-                                                                               end,
-                                                                          {yes, Expansion1++CC, [{Word2, [{ending, CC}]}]};
+                                                                    %   _ when NestingType =:= tuple ->
+                                                                    %       CC = case length(NestingArgs)+1 < NestingArity of
+                                                                    %                true -> ", ";
+                                                                    %                false -> close_nesting(Nestings)
+                                                                    %            end,
+                                                                    %       {yes, Expansion1++CC, [{Word2, [{ending, CC}]}]};
                                                                       _ -> 
                                                                         {Res1, Expansion1, Matches1}
                                                                   end
@@ -780,6 +869,12 @@ expand_module_function(Bef0, FT) ->
             fold_results(expand_helper(FT, TypeOfExpand, Word, CompleteChar))
         end
     end.
+expand_registered_names(Word) ->
+    %% Useful when a pid is expected
+    case match(Word, registered(), "") of
+        {_Res,_Expansion,[]}=M -> M;
+        {Res,Expansion, Matches} -> {Res,Expansion,[#{title=>"registered", elems=>Matches, options=>[highlight_all]}]}
+    end.
 expand_keyword(Word) ->
     Keywords = ["begin", "case", "of", "receive", "after", "maybe", "try", "catch", "throw", "if", "fun", "when", "end"],
     {Res, Expansion, Matches} = match(Word, Keywords, ""),
@@ -794,10 +889,10 @@ expand_helper(_, help_type, Word, CompleteChar) ->
     [expand_module_name(Word, CompleteChar)];
 expand_helper(FT, all, Word, CompleteChar) ->
     [expand_module_name(Word, CompleteChar), expand_bifs(Word), expand_shell_default(Word),
-     expand_user_defined_functions(FT, Word), expand_keyword(Word)];
+     expand_user_defined_functions(FT, Word), expand_keyword(Word), expand_registered_names(Word)];
 expand_helper(FT, _, Word, CompleteChar) ->
     [expand_module_name(Word, CompleteChar), expand_bifs(Word),
-     expand_user_defined_functions(FT, Word), expand_keyword(Word)].
+     expand_user_defined_functions(FT, Word), expand_keyword(Word), expand_registered_names(Word)].
 expand_function("("++Str) ->
     case edlin:over_word(Str, [], 0) of
         {_,"h",_} ->
@@ -930,16 +1025,39 @@ strip_quotes(Atom) ->
 
 match_preprocess_alt({_,_}=Alt) -> Alt;
 match_preprocess_alt(X) -> {X, ""}.
+toTitleCase(SnakeStr) ->
+    %% Split the string into a list of "words" divided by the underscore
+    Words = string:split(SnakeStr, "_", all),
+
+    %% Convert the list of words into camelCase format
+    CamelStr = case Words of
+        [] -> 
+            "";  %% Return empty if no words are present
+        _ -> 
+            %% Construct the camelCase string
+            lists:foldl(fun capitalize_and_concat/2, "", Words)
+    end,
+
+    CamelStr.
+
+%% Helper function to capitalize a word and concatenate it to the accumulator
+capitalize_and_concat(Word, Acc) ->
+    Acc ++ string:titlecase(Word).
 
 match(Prefix, Alts, Extra0) ->
+    %% When Alts is a list of binary, strings this function will not work
+    %%
     Alts2 = [match_preprocess_alt(A) || A <- Alts],
     Len = string:length(Prefix),
+    %% if H is an atom. this works, if H is a string, we want it to flat write it as \"string\"
+    %% or binary, we want to flat write it as <<binary>>
     Matches = lists:sort(
                 [{S, A} || {H, A} <- Alts2,
                            lists:prefix(Prefix, S=flat_write(H))]),
     Matches2 = lists:usort(
                  case Extra0 of
                      [] -> [{S,[]} || {S,_} <- Matches];
+                     ":=?" -> [{S,[{ending, ":="++toTitleCase(S)}]} || {S,_} <- Matches];
                      _  -> [{S,[{ending, Extra0}]} || {S,_} <- Matches]
                  end),
     case longest_common_head([N || {N, _} <- Matches]) of
@@ -956,6 +1074,7 @@ match(Prefix, Alts, Extra0) ->
             Extra = case {Extra0,Matches} of
                         {"/",[{Str,N}]} when is_integer(N) -> "/"++integer_to_list(N);
                         {"(",[{Str,0}]} -> "()";
+                        {":=?",[{Str,_}]} -> ":="++toTitleCase(Str);
                         {_,_} -> Extra0
                     end,
             {yes, string:slice(Str, Len) ++ Extra, ordsets:from_list(Matches2)};
@@ -965,6 +1084,11 @@ match(Prefix, Alts, Extra0) ->
 
 flat_write(T) when is_atom(T) ->
     lists:flatten(io_lib:fwrite("~tw",[T]));
+%%not correct s
+flat_write(T) when is_binary(T) ->
+    lists:flatten(io_lib:fwrite("<<\"~s\">>",[binary_to_list(T)]));
+%flat_write(T) when is_list(T) ->
+%    lists:flatten(io_lib:fwrite("\"~tw\"",[T]));
 flat_write(S) ->
     S.
 
@@ -1094,7 +1218,8 @@ format_section_matches(Elems, LineWidth, Acc) ->
 
 format_section_matches1([], _, _) -> [];
 format_section_matches1(LS, LineWidth, Len) ->
-    L = lists:usort(fun special_sort/2, ordsets:to_list(LS)),
+    L0 = lists:sort(fun special_sort/2, ordsets:to_list(LS)),
+    L = lists:uniq(L0),
     Opt = case Len == 0 of
         true -> [];
         false -> [{title, Len}]

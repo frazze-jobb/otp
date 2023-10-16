@@ -172,7 +172,12 @@ do_tp(X, Pattern, Flags) when is_list(Pattern) ->
 %% All nodes are handled the same way - also the local node if it is traced
 do_tp_on_nodes(Nodes, X, P, Flags) ->
     lists:map(fun(Node) ->
-		      case rpc:call(Node,erlang,trace_pattern,[X,P, Flags]) of
+		      case erpc:call(Node,erlang,trace_pattern,[X,P, Flags]) of
+					0 when element(1, X) =:= shell_default ->
+						Matches = erpc:call(Node, erlang, trace_pattern,
+											[{shell_default, '$handle_undefined_function', 2},
+											 P, Flags]),
+						{matched, Node, Matches};
 			  N when is_integer(N) ->
 			      {matched, Node, N};
 			  Else ->
@@ -1166,6 +1171,10 @@ dhandler1(Trace, Size, TS, {Device,Modifier}) ->
 
 %% {M,F,[A1, A2, ..., AN]} -> "M:F(A1, A2, ..., AN)"
 %% {M,F,A}                 -> "M:F/A"
+ffunc({shell_default, '$handle_undefined_function', [F, Args]}, Modifier) ->
+    ffunc({shell_default, F, Args}, Modifier);
+ffunc({shell_default = M, '$handle_undefined_function', Arity}, Modifier) ->
+    io_lib:format("~p:~"++Modifier++"p/~p", [M,'$unknown',Arity]);
 ffunc({M,F,Argl},Modifier) when is_list(Argl) ->
     io_lib:format("~p:~"++Modifier++"p(~"++Modifier++"s)",
                   [M, F, fargs(Argl,Modifier)]);

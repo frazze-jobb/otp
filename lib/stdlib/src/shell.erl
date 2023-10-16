@@ -25,9 +25,9 @@
 -export([local_func/0, local_func/1, local_allowed/3, non_local_allowed/3]).
 -export([catch_exception/1, prompt_func/1, strings/1]).
 -export([start_interactive/0, start_interactive/1]).
--export([read_and_add_records/5]).
+-export([read_and_add_records/5,read_and_add_records/1]).
 -export([whereis/0]).
-
+-export([list_commands2/3]).
 -define(LINEMAX, 30).
 -define(CHAR_MAX, 60).
 -define(DEF_HISTORY, 20).
@@ -302,7 +302,8 @@ get_command(Prompt, Eval, Bs, RT, FT, Ds) ->
                                   case Atom of
                                       record -> SpecialCase(rd);
                                       spec -> SpecialCase(ft);
-                                      type -> SpecialCase(td)
+                                      type -> SpecialCase(td);
+                                      _ -> erl_eval:extended_parse_exprs(Toks)
                                   end;
                               [{atom, _, FunName}, {'(', _}|_] ->
                                   case erl_parse:parse_form(Toks) of
@@ -370,18 +371,6 @@ reconstruct1([E|Body], Name, Arity) ->
     [E|reconstruct1(Body, Name, Arity)];
 reconstruct1([], _, _) -> [].
 semantic_error_gpt(Class, Reason, Stacktrace, _Eval, _Bs, RT, _FT, _Ds) ->
-    group_leader() ! {get_latest_cmd, self()},
-    LatestCmd = receive
-        {_GroupLeader, get_latest_cmd, Cmd} -> Cmd;
-        _ -> none
-    end,
-    ConversationId = case get(gpt_conversation) of
-        none -> {ok, ConversationId1} = shell_gpt:setup_semantic_error_conversation(),
-            put(gpt_conversation, ConversationId1),
-            ConversationId1;
-        ConversationId1 -> ConversationId1
-    end,
-    erlang:display(ConversationId),
     Cs = get(),
     Cs1 = lists:filter(fun({{command, _},_}) -> true;
                           ({{result, _},_}) -> true;
@@ -394,19 +383,15 @@ semantic_error_gpt(Class, Reason, Stacktrace, _Eval, _Bs, RT, _FT, _Ds) ->
     History = lists:flatten(io_lib:format("~ts~n", [lists:flatten(list_commands2(Cs3, RT, []))])),
 
     Error = lists:flatten(io_lib:format("~p~n", [{Class, {Reason,Stacktrace}}])),
-    case shell_gpt:correct_semantic_error(ConversationId, History, LatestCmd, Error) of
-        {ok, Response, _Usage} ->
-            Output = io_lib:format("\^[[41;37m~ts\^[[0m~n", [Response]),
-            io:requests([{put_chars, latin1, Output}]);
-            %get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
-        Error ->
-            erlang:display({semantic_gpt_error, Error})
-    end.
+    group_leader() ! {send_to_shell_gpt, History, Error}.
 %%get_command1(Pid, Eval, Bs, RT, FT, Ds, Timeout) ->
 get_command1(Pid, Eval, Bs, RT, FT, Ds) ->
     receive
         {shell_state, From} ->
             From ! {shell_state, Bs, RT, FT},
+            get_command1(Pid, Eval, Bs, RT, FT, Ds);
+        {shell_read_and_add_records, Mod} ->
+            read_and_add_records(Mod, '_', [], Bs, RT),
             get_command1(Pid, Eval, Bs, RT, FT, Ds);
         {'EXIT', Pid, Res} ->
             {Res, Eval};
@@ -643,6 +628,8 @@ get_state() ->
             #shell_state{bindings = Bs, records = ets:tab2list(RT), functions = ets:tab2list(FT)}
     end.
 
+read_and_add_records(Mod) ->
+    whereis() ! {shell_read_and_add_records, Mod}.
 get_function(Func, Arity) ->
     {shell_state, _Bs, _RT, FT} = get_state(),
     try
@@ -844,7 +831,8 @@ exprs([E0|Es], Bs1, RT, Lf, Ef, Bs0, W) ->
                 Es =:= [] ->
                     VS = pp(V0, 1, RT),
                     case W of
-                        cmd -> io:requests([{put_chars, unicode, VS}, nl]);
+                        cmd -> %io:requests([{put_chars, unicode, VS++"\x1b]633;D\x07"}, nl]);
+                            io:requests([{put_chars, unicode, VS}, nl]);
                         pmt -> ok
                     end,
                     %% Don't send the result back if it will be

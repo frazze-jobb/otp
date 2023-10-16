@@ -120,14 +120,41 @@ start_shell1(Fun) ->
           no_return().
 server_loop(Drv, Shell, Buf0) ->
     receive
+        {send_to_shell_gpt, History, Error} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Sending error report to AI\n")}),
+            ConversationId = case get(semantic_error_gpt_conversation) of
+                undefined -> {ok, ConversationId1} = shell_gpt:setup_semantic_error_conversation(),
+                    put(semantic_error_gpt_conversation, ConversationId1),
+                    ConversationId1;
+                ConversationId1 -> ConversationId1
+            end,
+            shell_gpt:send_query(ConversationId, [shell_gpt:user("History:\n"++History ++ "\nCommand:\n"++get(latest_cmd)++ "\nError:\n"++Error)]),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
+        {conversation_busy,_CID} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Conversation is busy, please try again later\n")}),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
+        {response,_CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
+        {function_call_output,_CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
+        {function_call,_CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
+        {function_call_awaiting_confirmation, CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            put(gpt_conversation, {waiting_confirmation, CID}),
+            %% Should do get_line1 here instead?
+            ?MODULE:server_loop(Drv, Shell, Buf0);
+        {error,_,_CID}=Error ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(io_lib:format("~p", [Error]))}),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
         {io_request,From,ReplyAs,Req} when is_pid(From) ->
             %% This io_request may cause a transition to a couple of
             %% selective receive loops elsewhere in this module.
             Buf = io_request(Req, From, ReplyAs, Drv, Shell, Buf0),
             ?MODULE:server_loop(Drv, Shell, Buf);
-        {get_latest_cmd, Pid} ->
-            Pid ! {self(), get_latest_cmd, get(latest_cmd)},
-            ?MODULE:server_loop(Drv, Shell, Buf0);
         {reply,{From,ReplyAs},Reply} ->
             io_reply(From, ReplyAs, Reply),
 	    ?MODULE:server_loop(Drv, Shell, Buf0);
@@ -526,17 +553,21 @@ get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
         {stop,Result,Rest} ->
             %% Prompt was valid expression, clear the prompt in user_drv
             %% First redraw without the multi line prompt
-            case LineCont of
-                {[CL|LB], _, _} ->
+            FormattedLine = format_expression(LineCont),
+            put(latest_cmd,FormattedLine),
+            case lists:reverse(string:split(FormattedLine, "\n", all)) of
+                %{[CL|LB], _, _} ->
+                [CL|LB] ->
+                    %LineCont1 = {LB,{lists:reverse(CL++"\n"++"\x1b]633;C\x07"), []},[]},
                     LineCont1 = {LB,{lists:reverse(CL++"\n"), []},[]},
                     MultiLinePrompt = lists:duplicate(prim_tty:npwcwidthstring(Pbs), $\s),
+                    %send_drv_reqs(Drv, [{redraw_prompt, "\x1b]633;A\x07"++Pbs++"\x1b]633;B\x07", MultiLinePrompt, LineCont1},new_prompt]);
                     send_drv_reqs(Drv, [{redraw_prompt, Pbs, MultiLinePrompt, LineCont1},new_prompt]);
                 _ -> skip %% oldshell mode
             end,
             _ = case {M,F} of
                     {io_lib, get_until} ->
-                        put(latest_cmd, string:trim(Line, both)),
-                        save_line_buffer(string:trim(Line, both)++"\n", get_lines(new_stack(get(line_buffer))));
+                        save_line_buffer(string:trim(FormattedLine, both)++"\n", get_lines(new_stack(get(line_buffer))));
                     _ ->
                         skip
                 end,
@@ -599,6 +630,16 @@ get_line1({open_editor, _Cs, Cont, Rs}, Drv, Shell, Ls0, Encoding) ->
             send_drv_reqs(Drv, NewRs),
             get_line1(edlin:edit_line(Cs1, NewCont), Drv, Shell, Ls0, Encoding)
     end;
+get_line1({format_expression, _Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    %% TODO: We do a simple way of formatting here,
+    %% save the expression to a file, open up emacs and format the expression
+    %% read the file back and redraw the expression
+    send_drv_reqs(Drv, Rs),
+    Cs1 = format_expression(Cont),
+    send_drv_reqs(Drv, edlin:erase_line()),
+    {more_chars,NewCont,NewRs} = edlin:start(edlin:prompt(Cont)),
+    send_drv_reqs(Drv, NewRs),
+    get_line1(edlin:edit_line(Cs1, NewCont), Drv, Shell, Ls, Encoding);
 %% Move Up, Down in History: Ctrl+P, Ctrl+N
 get_line1({history_up,Cs,Cont,Rs}, Drv, Shell, Ls0, Encoding) ->
     send_drv_reqs(Drv, Rs),
@@ -655,75 +696,161 @@ get_line1({search,Cs,Cont,Rs}, Drv, Shell, Ls, Encoding) ->
     {more_chars,Ncont,Nrs} = edlin:start(Pbs, {search,none}),
     send_drv_reqs(Drv, Nrs),
     get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+get_line1({gpt_new_conversation, Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    send_drv_reqs(Drv, Rs),
+    send_drv_reqs(Drv, edlin:erase_line()),
+    %% TODO list system prompts, or ask the user to insert their own system prompt
+    OldCID = get(gpt_conversation),
+    SystemPrompts = lists:map(fun({X,Y})-> io_lib:format("~p: ~s", [X,Y]) end, lists:enumerate(shell_gpt:list_system_prompts())),
+    SystemPromptsText = unicode:characters_to_binary("Available system prompts:\n"++lists:join("\n", SystemPrompts)++"\nnone: Your own system prompt\n\n"),
+    send_drv(Drv, {put_chars, unicode, SystemPromptsText}),
+    %NewCID = string:trim(io_request({get_line,Encoding,"New conversation system prompt: "}, Drv, Shell, self(), []), trailing),
+    Pbs = prompt_bytes("\033[;1;4mselect gpt system prompt:\033[0m ", Encoding),
+    {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
+    put(gpt_conversation, {select_system_prompt, OldCID}),
+    send_drv_reqs(Drv, Nrs),
+    get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+get_line1({gpt_switch_conversation, Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
+    send_drv_reqs(Drv, Rs),
+    send_drv_reqs(Drv, edlin:erase_line()),
+    %% TODO display available conversation IDs and their descriptions
+    %% display a prompt that expects a conversationID
+    OldCID = get(gpt_conversation),
+    %NewCID = io_request({get_line,Encoding,"Switch conversation (currently on "++OldCID++"): "}, Drv, Shell, self(), []),
+    %put(gpt_conversation, NewCID),
+    ListConversations = lists:map(fun(X) -> integer_to_list(X) end, shell_gpt:list_conversations()),
+    send_drv(Drv, {put_chars, unicode,
+        unicode:characters_to_binary("Available conversations:\n"++lists:join("\n", ListConversations)++"\n\n")}),
+    Pbs = prompt_bytes("\033[;1;4mswitch conversation (currently on "++integer_to_list(OldCID)++"):\033[0m ", Encoding),
+    {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
+    put(gpt_conversation, {select_conversation, OldCID}),
+    send_drv_reqs(Drv, Nrs),
+    get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
 get_line1({gpt, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
     send_drv_reqs(Drv, Rs),
+    put(gpt_quit_prompt, Cont),
     case get(gpt_conversation) of
         none ->
-            {ok, ConversationId1} = shell_gpt:setup_help_conversation(),
-            put(gpt_conversation, ConversationId1),
-            ConversationId1;
-        ConversationId1 -> ConversationId1
-    end,
-    put(gpt_quit_prompt, Cont),
-    Pbs = prompt_bytes("\033[;1;4mgpt:\033[0m ", Encoding),
-    %% Setup a conversation
-    send_drv_reqs(Drv, edlin:erase_line()),
-    {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
-    send_drv_reqs(Drv, Nrs),
-    %% Todo: start a new gpt conversation with a generic system prompt
-    %% Nothing more to do here, the magic happens in gpt_finish
-    %% While waiting for response, it should say processing()
-    %% group keeps track of the current conversation
-    %% Should you be able to read previous messages in the conversation? All messages are written to a conversation file, and each
-    %% belonging to a specific conversation are colored the same in the main window and a conversation number is displayed.
-    %% But the conversation files are not loaded upon restart of the shell.
-    get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+            %{ok, ConversationId1} = shell_gpt:setup_help_conversation(),
+            get_line1({gpt_new_conversation, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding);
+        {waiting_confirmation, _CID} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Do you want me to run it?\n")}),
+            Pbs = prompt_bytes("\033[;1;4mYes/No:\033[0m ", Encoding),
+            send_drv_reqs(Drv, edlin:erase_line()),
+            {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
+            send_drv_reqs(Drv, Nrs),
+            get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+        ConversationId1 when is_integer(ConversationId1) ->
+            Pbs = prompt_bytes("\033[;1;4mgpt "++integer_to_list(ConversationId1)++":\033[0m ", Encoding),
+            %% Setup a conversation
+            send_drv_reqs(Drv, edlin:erase_line()),
+            {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
+            send_drv_reqs(Drv, Nrs),
+            get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding)
+    end;
 get_line1({gpt_finish, _Cs, {line, _, LineCont, _}, Rs}, Drv, Shell, Ls, Encoding) ->
     send_drv_reqs(Drv, Rs),
+    send_drv_reqs(Drv, [{insert_chars, unicode, unicode:characters_to_binary("\n")}, new_prompt]),
     %% This should send the current expression to the gpt_server asynchronously, and the gpt_server should respond with 
     %% put_chars request via the io: module.
     %% The user can then enter gpt mode again and press alt+enter on the empty line which should then take the latest response from the
     %% server and extract the next prompt from it.
     ConversationId = get(gpt_conversation),
-    case LineCont of
-        {[],{[],[]},[]} -> %% Extract some code from the latest response
-            erlang:display({linecont, LineCont}),
-            case shell_gpt:extract_code(ConversationId) of
-                {ok, Code} -> 
-                    Prompt = edlin:prompt(get(gpt_quit_prompt)),
-                    LineCont1 = case Code of
-                        [] -> {[],{[],[]},[]};
-                        _ -> [Last| LB] = lists:reverse(Code),
-                             {LB, {lists:reverse(Last),[]},[]}
-                    end,
-                    send_drv_reqs(Drv, edlin:erase_line()),
-                    send_drv_reqs(Drv, edlin:redraw_line({line, Prompt, LineCont1, {normal, none}})),
-                    get_line1({done, LineCont1, "\n", Rs}, Drv, Shell, Ls, Encoding);
-                _Error ->
-                    NCont = get(gpt_quit_prompt),
-                    send_drv_reqs(Drv, [delete_line|Rs]),
-                    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
-                    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding)
+    NCont = get(gpt_quit_prompt),
+    case ConversationId of
+        {select_conversation, OldCID} -> Selection = edlin:current_line(LineCont),
+            case Selection of
+                "none" ->
+                    get_line1({gpt_new_conversation, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+                D -> try
+                        NewCID = list_to_integer(D),
+                        ListConversations = shell_gpt:list_conversations(),
+                        _ = lists:nth(NewCID, ListConversations),
+                        put(gpt_conversation, NewCID),
+                        get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding)
+                    catch _:_ ->
+                        put(gpt_conversation, OldCID),
+                        send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Invalid conversation selected, aborted\n")}),
+                        get_line1(edlin:edit_line1(_Cs, NCont), Drv, Shell, Ls, Encoding)
+                end
+            end;    
+        {select_system_prompt, OldCID} -> Selection = edlin:current_line(LineCont),
+            case Selection of
+                "none" ->
+                    Pbs = prompt_bytes("\033[;1;4mnew gpt system prompt:\033[0m ", Encoding),
+                    {more_chars,Ncont,Nrs} = edlin:start(Pbs, {gpt,none}),
+                    put(gpt_conversation, {waiting_system_prompt, OldCID}),
+                    send_drv_reqs(Drv, Nrs),
+                    get_line1(edlin:edit_line1(_Cs, Ncont), Drv, Shell, Ls, Encoding);
+                D -> try
+                        I = list_to_integer(D),
+                        SystemPrompts = shell_gpt:list_system_prompts(),
+                        SystemPrompt = lists:nth(I, SystemPrompts),
+                        {ok, NewCID} = shell_gpt:new_conversation(apply(shell_gpt, list_to_atom(SystemPrompt), [])),
+                        put(gpt_conversation,NewCID),
+                        get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding)
+                    catch _:_ ->
+                        put(gpt_conversation, OldCID),
+                        send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Invalid system prompt, new conversation aborted\n")}),
+                        get_line1(edlin:edit_line1(_Cs, NCont), Drv, Shell, Ls, Encoding)
+                    end
             end;
-        _ -> %% Send the current expression to the gpt_server
-            erlang:display({gpt, ConversationId, edlin:current_line(LineCont)}),
-            case shell_gpt:ask_for_help(ConversationId, edlin:current_line(LineCont)) of
-                {ok, Response, _Usage} ->
-                    NCont = get(gpt_quit_prompt),
-                    send_drv_reqs(Drv, [new_prompt]),
-                    %% TODO: make output pretty with asci box characters and only color the box
-                    %% Also put a box around the input query with a different color?
-                    send_drv_reqs(Drv, [{put_chars, unicode, unicode:characters_to_binary("\^[[44;37m"++Response++"\^[[0m\n")}]),
-                    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
-                    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
-                Error ->
-                    NCont = get(gpt_quit_prompt),
-                    send_drv_reqs(Drv, {put_chars, unicode, unicode:characters_to_binary("Error from gpt_server")}),
-                    erlang:display(Error),
-                    send_drv_reqs(Drv, [delete_line|Rs]),
-                    send_drv_reqs(Drv, edlin:redraw_line(NCont)),
-                    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding)
-            end
+        {waiting_system_prompt, _OldCID} -> 
+            {ok, NewCID} = shell_gpt:new_conversation(shell_gpt:system(edlin:current_line(LineCont))),
+            put(gpt_conversation,NewCID),
+            get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+        {waiting_confirmation, CID} ->
+            case edlin:current_line(LineCont) of
+                [$Y|_] -> %% Yes
+                    shell_gpt:send_confirm(CID),
+                    put(gpt_conversation, {confirm, CID}),
+                    get_line1({gpt_finish, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+                [$N|_] -> %% No
+                    shell_gpt:send_decline(CID),
+                    put(gpt_conversation, {confirm, CID}),
+                    get_line1({gpt_finish, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+                _ -> %% Invalid input
+                    send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Invalid input, please enter Yes or No\n")}),
+                    get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding)
+            end;
+        {confirm, CID} ->
+            put(gpt_conversation, CID),
+            ReceiveGPT=fun X() ->
+                receive
+                    conversation_busy -> send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Conversation is busy, probably a fault\n")}),
+                        get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+                    {response, Response} -> send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)});
+                    {function_call_output, Response} ->send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+                        X();
+                    {function_call, Response} ->send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+                        X();
+                    {function_call_awaiting_confirmation, Response} ->
+                        send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+                        put(gpt_conversation, {waiting_confirmation, CID});
+                    {error,_}=Error ->send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(io_lib:format("~p", [Error]))})
+                end
+            end,
+            ReceiveGPT(),
+            get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+        CID when is_integer(CID) -> %% Send the current expression to the gpt_server
+            shell_gpt:send_query(CID, [shell_gpt:user(edlin:current_line(LineCont))]),
+            ReceiveGPT=fun X() ->
+                receive
+                    {conversation_busy, _CID} -> send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Conversation is busy, please try again later\n")}),
+                        get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding);
+                    {response, _CID, Response} -> send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)});
+                    {function_call_output, _CID, Response} ->send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+                        X();
+                    {function_call, _CID, Response} ->send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+                        X();
+                    {function_call_awaiting_confirmation, CID, Response} ->
+                        send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+                        put(gpt_conversation, {waiting_confirmation, CID});
+                    {error,_,_CID}=Error ->send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(io_lib:format("~p", [Error]))})
+                end
+            end,
+            ReceiveGPT(),
+            get_line1({gpt, _Cs, NCont, []}, Drv, Shell, Ls, Encoding)
     end;
 get_line1({gpt_cancel, _Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
     NCont = get(gpt_quit_prompt),
@@ -731,22 +858,37 @@ get_line1({gpt_cancel, _Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
     send_drv_reqs(Drv, edlin:redraw_line(NCont)),
     get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
 get_line1({gpt_quit, _Cs, _Cont, Rs}, Drv, Shell, Ls, Encoding) ->
-    %% Should you be able to go back to the conversation we quit? Yes
     NCont = get(gpt_quit_prompt),
+    case get(gpt_conversation) of
+        {waiting_system_prompt, OldCID} -> put(gpt_conversation, OldCID);
+        _ -> ok
+    end,
     send_drv_reqs(Drv, [delete_line|Rs]),
     send_drv_reqs(Drv, edlin:redraw_line(NCont)),
-    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
-%get_line1({gpt_new_conversation, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
-    %% Should you be able to start a new conversation? Yes
-%    get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
-%get_line1({gpt_switch_conversation, Cs, Cont, Rs}, Drv, Shell, Ls, Encoding) ->
-    %% Should you be able to switch to a previous conversation? Yes
- %   get_line1(edlin:edit_line1(Cs, Ncont), Drv, Shell, Ls, Encoding);
+    get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);  
+get_line1({help, Before, Cs0, Cont, Rs}, Drv, Shell, Ls0, Encoding) ->
+    send_drv_reqs(Drv, Rs),
+    {_,Word,_} = edlin:over_word(Before, [], 0),
+    Docs = case edlin_context:get_context(Before) of
+        {function, Mod} when Word =/= [] -> try
+                    c:h1(list_to_atom(Mod), list_to_atom(Word))
+                catch _:_ ->
+                    c:h1(list_to_atom(Mod))
+                end;
+        {function, Mod} -> c:h1(list_to_atom(Mod));
+        {function, Mod, Fun, _Args, _Unfinished, _Nesting} -> c:h1(list_to_atom(Mod), list_to_atom(Fun));
+        _ -> ""
+    end,
+    case Docs of
+        {error, _} -> send_drv(Drv, beep);
+            _ -> send_drv(Drv, {put_expand, unicode, ["\n",unicode:characters_to_binary(string:trim(Docs, both))]})
+    end,
+    get_line1(edlin:edit_line(Cs0, Cont), Drv, Shell, Ls0, Encoding);
 get_line1({Expand, Before, Cs0, Cont,Rs}, Drv, Shell, Ls0, Encoding)
   when Expand =:= expand; Expand =:= expand_full ->
     send_drv_reqs(Drv, Rs),
     ExpandFun = get(expand_fun),
-    {Found, CompleteChars, Matches} = ExpandFun(Before, []),
+    {Found, CompleteChars, Matches} = ExpandFun(Before, [{'after', edlin:after_cursor(Cont)}]),
     case Found of
         no -> send_drv(Drv, beep);
         _ -> ok
@@ -765,32 +907,32 @@ get_line1({Expand, Before, Cs0, Cont,Rs}, Drv, Shell, Ls0, Encoding)
                  NlMatchStr = unicode:characters_to_binary("\n"++MatchStr),
                  case get(expand_below) of
                      true ->
-                         Lines = string:split(string:trim(MatchStr), "\n", all),
-                         NoLines = length(Lines),
-                         if NoLines > 5, Expand =:= expand ->
-                                 %% Only show 5 lines to start with
-                                 [L1,L2,L3,L4,L5|_] = Lines,
-                                 String = lists:join(
-                                            $\n,
-                                            [L1,L2,L3,L4,L5,
-                                             io_lib:format("Press tab to see all ~p expansions",
-                                                           [edlin_expand:number_matches(Matches)])]),
-                                 send_drv(Drv, {put_expand, unicode,
-                                                unicode:characters_to_binary(String)}),
-                                 Cs1;
-                            true ->
-                                 case get_tty_geometry(Drv) of
-                                     {_, Rows} when Rows > NoLines ->
-                                         %% If all lines fit on screen, we expand below
+                         %Lines = string:split(string:trim(MatchStr), "\n", all),
+                         %NoLines = length(Lines),
+                         %if NoLines > 5, Expand =:= expand ->
+                         %        %% Only show 5 lines to start with
+                         %        [L1,L2,L3,L4,L5|_] = Lines,
+                         %        String = lists:join(
+                         %                   $\n,
+                         %                   [L1,L2,L3,L4,L5,
+                         %                    io_lib:format("Press tab to see all ~p expansions",
+                         %                                  [edlin_expand:number_matches(Matches)])]),
+                         %        send_drv(Drv, {put_expand, unicode,
+                         %                       unicode:characters_to_binary(String)}),
+                         %        Cs1;
+                         %   true ->
+                                 %case get_tty_geometry(Drv) of
+                                 %    {_, Rows} when Rows > NoLines ->
+                                 %        %% If all lines fit on screen, we expand below
                                          send_drv(Drv, {put_expand, unicode, NlMatchStr}),
                                          Cs1;
-                                     _ ->
+                                 %    _ ->
                                          %% If there are more results than fit on
                                          %% screen we expand above
-                                         send_drv_reqs(Drv, [{put_chars, unicode, NlMatchStr}]),
-                                         [$\e, $l | Cs1]
-                                 end
-                         end;
+                                 %        send_drv_reqs(Drv, [{put_chars, unicode, NlMatchStr}]),
+                                 %        [$\e, $l | Cs1]
+                         %        end
+                         %end;
                      false ->
                          send_drv(Drv, {put_chars, unicode, NlMatchStr}),
                          [$\e, $l | Cs1]
@@ -838,19 +980,27 @@ get_line1({search_cancel,_Cs,_,Rs}, Drv, Shell, Ls, Encoding) ->
     send_drv_reqs(Drv, edlin:redraw_line(NCont)),
     get_line1({more_chars, NCont, []}, Drv, Shell, Ls, Encoding);
 %% Search mode is entered.
-get_line1({What,{line,Prompt,{_,{RevCmd0,_},_},{search, none}},_Rs},
+get_line1({What,{line,Prompt,{_,{RevCmd0,_},_},{search, none}}=Cont0,_Rs},
           Drv, Shell, Ls0, Encoding) ->
     %% Figure out search direction. ^S and ^R are returned through edlin
     %% whenever we received a search while being already in search mode.
+    OldSearch = get(search),
     {Search, Ls1, RevCmd} = case RevCmd0 of
                                 [$\^S|RevCmd1] ->
                                     {fun search_down_stack/2, Ls0, RevCmd1};
                                 [$\^R|RevCmd1] ->
                                     {fun search_up_stack/2, Ls0, RevCmd1};
-                                _ -> % new search, rewind stack for a proper search.
-                                    {fun search_up_stack/2, new_stack(get_lines(Ls0)), RevCmd0}
+                                _ when RevCmd0 =/= OldSearch -> % new search, rewind stack for a proper search.
+                                    {fun search_up_stack/2, new_stack(get_lines(Ls0)), RevCmd0};
+                                _ ->
+                                    {skip, Ls0, RevCmd0}
                             end,
+    put(search, RevCmd),
     Cmd = lists:reverse(RevCmd),
+    if Search =:= skip -> 
+        send_drv_reqs(Drv, _Rs),
+        more_data(What, Cont0, Drv, Shell, Ls0, Encoding);
+true ->
     {Ls, NewStack} = case Search(Ls1, Cmd) of
                          {none, Ls2} ->
                              send_drv(Drv, beep),
@@ -860,26 +1010,41 @@ get_line1({What,{line,Prompt,{_,{RevCmd0,_},_},{search, none}},_Rs},
                              {Ls2, {[],{RevCmd, []},[]}};
                          {Line, Ls2} -> % found. Complete the output edlin couldn't have done.
                              Lines = string:split(string:to_graphemes(Line), "\n", all),
-                             Output = if length(Lines) > 5 ->
-                                            [A,B,C,D,E|_]=Lines,
-                                            (["\n  " ++ Line1 || Line1 <- [A,B,C,D,E]] ++
-                                                [io_lib:format("~n  ... (~w lines omitted)",[length(Lines)-5])]);
-                                         true -> ["\n  " ++ Line1 || Line1 <- Lines]
-                                      end,
                              put(search_result, Lines),
                              send_drv(Drv, delete_line),
                              send_drv(Drv, {insert_chars, unicode, unicode:characters_to_binary(Prompt++Cmd)}),
-                             send_drv(Drv, {put_expand_no_trim, unicode, unicode:characters_to_binary(Output)}),
+                             send_drv(Drv, {put_expand_no_trim, unicode, unicode:characters_to_binary(Line)}),
                              {Ls2, {[],{RevCmd, []},[]}}
                      end,
     Cont = {line,Prompt,NewStack,{search, none}},
-    more_data(What, Cont, Drv, Shell, Ls, Encoding);
+    more_data(What, Cont, Drv, Shell, Ls, Encoding)
+                    end;
 get_line1({What,Cont0,Rs}, Drv, Shell, Ls, Encoding) ->
     send_drv_reqs(Drv, Rs),
     more_data(What, Cont0, Drv, Shell, Ls, Encoding).
 
 more_data(What, Cont0, Drv, Shell, Ls, Encoding) ->
     receive
+        {conversation_busy,_CID} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Conversation is busy, please try again later\n")}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {response,_CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {function_call_output,_CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {function_call,_CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {function_call_awaiting_confirmation, CID, Response} ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Response)}),
+            put(gpt_conversation, {waiting_confirmation, CID}),
+            %% Should do get_line1 here instead?
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {error,_,_CID}=Error ->
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(io_lib:format("~p", [Error]))}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
         {Drv, activate} ->
             send_drv_reqs(Drv, edlin:redraw_line(Cont0)),
             more_data(What, Cont0, Drv, Shell, Ls, Encoding);
@@ -963,7 +1128,25 @@ get_chars_echo_off1(Drv, Shell) ->
         {'EXIT',Shell,R} ->
             exit(R)
     end.
-
+format_expression(Cont) ->
+    MkTemp = case os:type() of
+        {win32, _} ->
+            os:cmd("powershell \"write-host (& New-TemporaryFile | Select-Object -ExpandProperty FullName)\"");
+        {unix,_} ->
+            os:cmd("mktemp")
+    end,
+    TmpFile = string:chomp(MkTemp) ++ ".erl",
+    Buffer = edlin:current_line(Cont),
+    _ = file:write_file(TmpFile, unicode:characters_to_binary(Buffer, unicode)),
+    os:cmd("emacs -batch "++TmpFile++" -l ~/erlang-format/emacs-format-file -f emacs-format-function"),
+    {ok, Content} = file:read_file(TmpFile),
+    _ = file:del_dir_r(TmpFile),
+    Unicode = case unicode:characters_to_list(Content,unicode) of
+                  {error, _, _} -> unicode:characters_to_list(
+                                     unicode:characters_to_list(Content,latin1), unicode);
+                  U -> U
+              end,
+    string:chomp(Unicode).
 %% We support line editing for the ICANON mode except the following
 %% line editing characters, which already has another meaning in
 %% echo-on mode (See Advanced Programming in the Unix Environment, 2nd ed,

@@ -25,7 +25,7 @@
 -export([init/0,init/1,start/1,start/2,edit_line/2]).
 -export([erase_line/0,erase_inp/1,redraw_line/1]).
 -export([length_before/1,length_after/1,prompt/1]).
--export([current_line/1, current_chars/1]).
+-export([current_line/1, current_chars/1, after_cursor/1]).
 
 -export([edit_line1/2]).
 -export([inverted_space_prompt/1]).
@@ -143,7 +143,8 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode1, EscapePrefix}, Rs0) ->
                 gpt -> {insert, C1};
                 search when $\s =< C1 ->{insert_search, C1};
                 search -> search_quit;
-                tab_expand -> tab_expand_quit
+                tab_expand -> tab_expand_quit;
+                help -> tab_expand_quit
             end,
             case Op of
                 tab_expand_quit ->
@@ -171,21 +172,25 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode1, EscapePrefix}, Rs0) ->
                     end;
                 {ok, Value0} -> Value0
             end,
+            Cont = {line,P,MultiLine,{normal, none}},
             case Value of
                 {mode, Mode1} ->
                     %erlang:display({mode, {Mode1,ShellMode}, Buf}),
                     edit(Buf, P, MultiLine, {{Mode1, ShellMode}, none}, Rs0);
                 none -> edit(Cs, P, MultiLine, {normal,none}, Rs0);
-                gpt -> {gpt, Cs, {line, P, MultiLine,{normal, none}}, reverse(Rs0)};
-                gpt_finish -> {gpt_finish, Cs, {line, P, MultiLine,{normal, none}}, reverse(Rs0)};
-                gpt_quit -> {gpt_quit, Cs, {line, P, MultiLine,{normal, none}}, reverse(Rs0)};
-                search -> {search,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                search_found -> {search_found,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                search_cancel -> {search_cancel,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                search_quit -> {search_quit,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                open_editor -> {open_editor,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                history_up -> {history_up,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                history_down -> {history_down,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                gpt -> {gpt, Cs, Cont, reverse(Rs0)};
+                gpt_new_conversation -> {gpt_new_conversation, Cs, Cont, reverse(Rs0)};
+                gpt_switch_conversation -> {gpt_switch_conversation, Cs, Cont, reverse(Rs0)};
+                gpt_finish -> {gpt_finish, Cs, Cont, reverse(Rs0)};
+                gpt_quit -> {gpt_quit, Cs, Cont, reverse(Rs0)};
+                search -> {search,Cs,Cont,reverse(Rs0)};
+                search_found -> {search_found,Cs,Cont,reverse(Rs0)};
+                search_cancel -> {search_cancel,Cs,Cont,reverse(Rs0)};
+                search_quit -> {search_quit,Cs,Cont,reverse(Rs0)};
+                format_expression -> {format_expression,Cs,Cont,reverse(Rs0)};
+                open_editor -> {open_editor,Cs,Cont,reverse(Rs0)};
+                history_up -> {history_up,Cs,Cont,reverse(Rs0)};
+                history_down -> {history_down,Cs,Cont,reverse(Rs0)};
                 new_line ->
                     MultiLine1 = {[lists:reverse(Bef)|LB],{[],Aft},LA},
                     edit(Cs, P, MultiLine1, {NextMode, none}, reverse(redraw(P, MultiLine1, Rs0)));
@@ -264,6 +269,14 @@ do_op({insert,C}, {LB,{[Bef|Bef0], Aft},LA}, Rs) ->
 %% search: $TERMS
 %%   $ResultLine1
 %%   $ResultLine2
+do_op(move_expand_up, Cont, Rs) ->
+    {Cont, [{move_expand, -1}|Rs]};
+do_op(move_expand_down, Cont, Rs) ->
+    {Cont, [{move_expand, 1}|Rs]};
+do_op({search,move_expand_up}, Cont, Rs) ->
+    {Cont, [{move_expand, -1}|Rs]};
+do_op({search,move_expand_down}, Cont, Rs) ->
+    {Cont, [{move_expand, 1}|Rs]};
 do_op({insert_search, C}, {LB,{Bef, []},LA}, Rs) ->
     {{LB, {[C|Bef],[]}, LA},
      [{insert_chars, unicode, [C]}, delete_after_cursor | Rs]};
@@ -766,6 +779,8 @@ length_after({line,_,{_,{_Bef,Aft},_},_}) ->
 prompt({line,Pbs,_,_}) ->
     Pbs.
 
+after_cursor({line,_,{_,{_Bef,Aft},LA},_}) ->
+    current_line({[],{[],Aft},LA}).
 current_chars({line,_,MultiLine,_}) ->
     current_line(MultiLine).
 current_line({line,_,MultiLine,_}) ->

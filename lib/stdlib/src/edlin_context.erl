@@ -65,6 +65,7 @@
                | {fun_, Mod, Fun} %% cursor is in a fun mod:fun statement
                | {new_fun, Unfinished}
                | {function}
+               | {function, Mod}
                | {function, Mod, Fun, Args, Unfinished, Nesting}
                | {map, Binding, Keys}
                | {map_or_record}
@@ -74,7 +75,8 @@
 get_context(Line) ->
     {Bef0, Word} = edlin_expand:over_word(Line),
     case {{Bef0, Word}, odd_quotes($", Bef0)} of
-        {_, true} -> {string};
+        {{[$"|Bef1],_}, true} -> ParentContext = get_context(Bef1),
+            {string, ParentContext};
         {{[$#|_], []}, _} -> {map_or_record};
         {{_Bef1, Word}, _} ->
             case is_binding(Word) of
@@ -92,14 +94,16 @@ get_context([], #context{arguments = Args, parameter_count = Count, nestings = N
         true -> {term, lists:droplast(Args), lists:last(Args)};
         _ ->
             %% Nestings will not end up as an argument
-            case Nestings of
+            Nestings1 = lists:reverse(Nestings),
+            case Nestings1 of
                 [] -> case Count of
                     0 when length(Args) > 0 -> {term, lists:droplast(Args), lists:last(Args)};
                     _ -> {term, Args, []}
                 end;
-                [{list, Args1, Arg}] -> {term, Args1, Arg};
-                [{tuple, Args1, Arg}] -> {term, Args1, Arg};
-                [{map, _, _, Args1, Arg}] -> {term, Args1, Arg}
+                %% TODO: what todo with multiple nestings {case_clause,[{list,[],[]},{tuple,[],[]}]}
+                [{list, Args1, Arg}|_] -> {term, Args1, Arg};
+                [{tuple, Args1, Arg}|_] -> {term, Args1, Arg};
+                [{map, Fields, _, _Args1, _Arg}|_] -> {map, [], Fields}
             end
     end;
 get_context([$(|Bef], CR) ->
@@ -152,7 +156,22 @@ get_context([${|Bef], #context{ fields=Fields,
                                 %% We finished a nesting lets reset and read the next nesting
                                 nestings = [{'tuple', Args, Unfinished}|Nestings]});
         {[$#|_Bef3], Record} -> %% Record
-            {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings}
+            case get_context(_Bef3) of
+                {function, Mod, _, _, _, _} ->
+                    {record, Mod, Record, Fields, FieldToComplete, Args, Unfinished, Nestings};
+                _ ->
+                    {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings}
+            end;
+        {[], _} ->
+            %% TODO a{ produces {case_clause,{[],"a"} not really valid syntax, should we stop expanding, or just ignore?
+            get_context(Bef, #context{
+                %% We finished a nesting lets reset and read the next nesting
+                nestings = [{'tuple', Args, Unfinished}|Nestings]});
+        {_, _} ->
+            %% TODO a{ produces {case_clause,{[],"a"} not really valid syntax, should we stop expanding, or just ignore?
+            get_context(Bef, #context{
+                %% We finished a nesting lets reset and read the next nesting
+                nestings = [{'tuple', Args, Unfinished}|Nestings]})
     end;
 get_context([$[|Bef1], #context{arguments = Arguments, parameter_count = Count, nestings=Nestings}) ->
     {Args, Unfinished} = case Count+1 == length(Arguments) of
@@ -203,7 +222,13 @@ get_context([$.|Bef2], CR) ->
                          end,
     case edlin_expand:over_word(Bef2) of
         {[$#|_Bef3], Record} -> %% Record
-            {record, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings};
+            case get_context(_Bef3) of
+                {function, Mod, _, _, _, _} ->
+                    {record, Mod, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings};
+                _ ->
+                    {record, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings}
+            end;
+            
         _ -> {'end'}
     end;
 get_context([$:|Bef2], _) ->
@@ -211,7 +236,8 @@ get_context([$:|Bef2], _) ->
     {Bef3, Mod} = edlin_expand:over_word(Bef2),
     case edlin_expand:over_word(Bef3) of
         {_, "fun"} -> {fun_, Mod};
-        _ -> {function}
+        _ when Mod =:= [] -> {function};
+        _ -> {function, Mod}
     end;
 get_context([$/|Bef1], _) ->
     {Bef2, Fun} = edlin_expand:over_word(Bef1),
@@ -236,9 +262,15 @@ get_context(Bef0, #context{arguments=Args, parameter_count=Count} = CR) ->
     case over_to_opening(Bef0) of
         {_,[]} -> {term};
         {error, _}=E -> E;
-        {record} -> {record};
-        {fun_} -> {fun_};
-        {new_fun, _}=F -> F;
+        {Bef1, record} -> 
+            case get_context(Bef1) of
+                {function, Mod, _, _, _, _} ->
+                    {record, Mod};
+                _ ->
+                    {record}
+            end;
+        {_, fun_} -> {fun_};
+        {_, {new_fun, _}}=F -> F;
         {Bef1, {fun_, Str}=Arg} ->
             case Count of
                 0 ->
@@ -336,14 +368,14 @@ over_to_opening1(Bef, Acc = #{args := Args}) ->
                 {Bef2, []} -> over_to_opening_return(Bef2, Args);
                 {Bef2, Arg} -> over_to_opening1(Bef2, Acc#{args => [Arg | Args]})
             end
-        end.
+    end.
 over_to_opening_return(Bef, Args) ->
     case Args of
         [] -> {Bef, []};
         [Arg] -> {Bef, Arg};
         [{operator, "-"}, {integer, I}] -> {Bef, {integer, "-" ++ I}};
         [{operator, "-"}, {float, F}] -> {Bef, {float, "-" ++ F}};
-        [{atom, "fun"}, {atom, _}] -> throw({fun_});
+        [{atom, "fun"}, {atom, _}] -> throw({Bef, fun_});
         _ ->
             case look_for_non_operator_separator(Args) of
                 true -> {Bef, {operation, lists:flatten(lists:join(" ", lists:map(fun({_, Arg}) -> Arg end, Args)))}};
@@ -428,11 +460,11 @@ over_parenthesis_or_call(Bef2) ->
                                 {Bef42, Mod++[$:|Fun]};
                             _ -> {Bef4, Fun}
                         end,
-        case ModFun of
-            [] -> {Bef5, {parenthesis, Clause}};
-            "fun" -> throw({new_fun, Clause});
-            _ -> {Bef5, {call, ModFun++Clause}}
-        end
+                        case ModFun of
+                            [] -> {Bef5, {parenthesis, Clause}};
+                            "fun" -> throw({Bef5, {new_fun, Clause}});
+                            _ -> {Bef5, {call, ModFun++Clause}}
+                        end
     end.
 over_keyword_or_fun(Bef1) ->
     case over_keyword_expression(Bef1) of
@@ -498,7 +530,7 @@ extract_argument(Bef0) ->
                     case is_binding(Var) of
                         true -> {Bef2,{var, Var}};
                         false -> case Bef2 of
-                            [$#|_] -> throw({record});
+                            [$#|Bef3] -> throw({Bef3, record});
                             _ -> {Bef2, {atom, Var}}
                         end
                     end

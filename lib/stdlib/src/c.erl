@@ -30,7 +30,7 @@
 	 lc_batch/0, lc_batch/1,
 	 i/3,pid/3,m/0,m/1,mm/0,lm/0,
 	 bt/1, q/0,
-         h/1,h/2,h/3,ht/1,ht/2,ht/3,hcb/1,hcb/2,hcb/3,
+     h/1,h/2,h/3,h1/1,h1/2,h1/3,ht/1,ht/2,ht/3,hcb/1,hcb/2,hcb/3,
 	 erlangrc/0,erlangrc/1,bi/1, flush/0, regs/0, uptime/0,
 	 nregs/0,pwd/0,ls/0,ls/1,cd/1,memory/1,memory/0, xm/1]).
 
@@ -189,6 +189,38 @@ h(Module,Function,Arity) ->
     case code:get_doc(Module) of
         {ok, #docs_v1{ format = Format } = Docs} when ?RENDERABLE_FORMAT(Format) ->
             format_docs(shell_docs:render(Module, Function, Arity, Docs));
+        {ok, #docs_v1{ format = Enc }} ->
+            {error, {unknown_format, Enc}};
+        Error ->
+            Error
+    end.
+-spec h1(module()) -> h_return().
+h1(Module) ->
+    case code:get_doc(Module) of
+        {ok, #docs_v1{ format = Format } = Docs} when ?RENDERABLE_FORMAT(Format) ->
+            shell_docs:render(Module, Docs);
+        {ok, #docs_v1{ format = Enc }} ->
+            {error, {unknown_format, Enc}};
+        Error ->
+            Error
+    end.
+
+-spec h1(module(),function()) -> hf_return().
+h1(Module,Function) ->
+    case code:get_doc(Module) of
+        {ok, #docs_v1{ format = Format } = Docs} when ?RENDERABLE_FORMAT(Format) ->
+            shell_docs:render(Module, Function, Docs);
+        {ok, #docs_v1{ format = Enc }} ->
+            {error, {unknown_format, Enc}};
+        Error ->
+            Error
+    end.
+
+-spec h1(module(),function(),arity()) -> hf_return().
+h1(Module,Function,Arity) ->
+    case code:get_doc(Module) of
+        {ok, #docs_v1{ format = Format } = Docs} when ?RENDERABLE_FORMAT(Format) ->
+            shell_docs:render(Module, Function, Arity, Docs);
         {ok, #docs_v1{ format = Enc }} ->
             {error, {unknown_format, Enc}};
         Error ->
