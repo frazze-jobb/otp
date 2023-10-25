@@ -47,6 +47,7 @@ server(Ancestors, Drv, Shell, Options) ->
     put(line_buffer, proplists:get_value(line_buffer, Options, group_history:load())),
     put(read_mode, list),
     put(user_drv, Drv),
+    put(gpt_conversation, none),
     ExpandFun = normalize_expand_fun(Options, fun edlin_expand:expand/2),
     put(expand_fun, ExpandFun),
     put(echo, proplists:get_value(echo, Options, true)),
@@ -100,7 +101,13 @@ start_shell1(M, F, Args) ->
 	    exit(Error)				% let the group process crash
 
     end.
-
+color_map() ->
+    #{
+        0 => {113, 10},
+        1 => {176, 168},
+        2 => {202, 208},
+        3 => {39, 45}
+    }.
 start_shell1(Fun) ->
     G = group_leader(),
     group_leader(self(), self()),
@@ -119,6 +126,16 @@ start_shell1(Fun) ->
           no_return().
 server_loop(Drv, Shell, Buf0) ->
     receive
+        {send_to_shell_gpt, History, Error} ->
+            ConversationId = case get(semantic_error_gpt_conversation) of
+                undefined -> %{ok, ConversationId1} = shell_gpt:setup_semantic_error_conversation(),
+                    put(semantic_error_gpt_conversation, 0),
+                    0;
+                ConversationId1 -> ConversationId1
+            end,
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("Sending error report to AI (ConvID: "++integer_to_list(ConversationId)++")\n")}),
+            shell_gpt:send_query(ConversationId, [shell_gpt:user("History:\n"++History ++ "\nCommand:\n"++get(latest_cmd)++ "\nError:\n"++Error)]),
+            ?MODULE:server_loop(Drv, Shell, Buf0);
         {io_request,From,ReplyAs,Req} when is_pid(From) ->
             %% This io_request may cause a transition to a couple of
             %% selective receive loops elsewhere in this module.
@@ -786,6 +803,46 @@ get_line1({What,Cont0,Rs}, Drv, Shell, Ls, Encoding) ->
 
 more_data(What, Cont0, Drv, Shell, Ls, Encoding) ->
     receive
+        {conversation_busy,_CID} ->
+            ColorMap = color_map(),
+            {_BackgroundUser, BackgroundAssistant} = maps:get(_CID rem 4, ColorMap),
+            Response = "Conversation is busy, please try again later\n",
+            Boxed = Response,%edlin:limit_column_width(Response, 100),
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("\e[48;5;"++integer_to_list(BackgroundAssistant)++"m" ++Boxed++"\e[0m\n")}),
+
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {response,_CID, Response} ->
+            ColorMap = color_map(),
+            {_BackgroundUser, BackgroundAssistant} = maps:get(_CID rem 4, ColorMap),
+            Boxed = Response,%edlin:limit_column_width(Response, 100),
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("\e[48;5;"++integer_to_list(BackgroundAssistant)++"m" ++Boxed++"\e[0m\n")}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {function_call_output,_CID, Response} ->
+            ColorMap = color_map(),
+            {BackgroundUser, _BackgroundAssistant} = maps:get(_CID rem 4, ColorMap),
+            Boxed = Response,%edlin:limit_column_width(Response, 100),
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("\e[48;5;"++integer_to_list(BackgroundUser)++"m" ++Boxed++"\e[0m\n")}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {function_call,_CID, Response} ->
+            ColorMap = color_map(),
+            {_BackgroundUser, BackgroundAssistant} = maps:get(_CID rem 4, ColorMap),
+            Boxed = Response,%edlin:limit_column_width(Response, 100),
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("\e[48;5;"++integer_to_list(BackgroundAssistant)++"m" ++Boxed++"\e[0m\n")}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {function_call_awaiting_confirmation, CID, Response} ->
+            ColorMap = color_map(),
+            {_BackgroundUser, BackgroundAssistant} = maps:get(CID rem 4, ColorMap),
+            Boxed = Response,%edlin:limit_column_width(Response, 100),
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("\e[48;5;"++integer_to_list(BackgroundAssistant)++"m" ++Boxed++"\e[0m\n")}),
+            %% Should do get_line1 here instead?
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
+        {error,_,_CID}=Error ->
+            ColorMap = color_map(),
+            {_BackgroundUser, BackgroundAssistant} = maps:get(_CID rem 4, ColorMap),
+            Response = io_lib:format("~p", [Error]),
+            Boxed = Response,%edlin:limit_column_width(Response, 100),
+            send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary("\e[48;5;"++integer_to_list(BackgroundAssistant)++"m" ++Boxed++"\e[0m\n")}),
+            more_data(What, Cont0, Drv, Shell, Ls, Encoding);
         {Drv, activate} ->
             send_drv_reqs(Drv, edlin:redraw_line(Cont0)),
             more_data(What, Cont0, Drv, Shell, Ls, Encoding);

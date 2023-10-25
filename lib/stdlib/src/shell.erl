@@ -25,9 +25,9 @@
 -export([local_func/0, local_func/1, local_allowed/3, non_local_allowed/3]).
 -export([catch_exception/1, prompt_func/1, strings/1]).
 -export([start_interactive/0, start_interactive/1]).
--export([read_and_add_records/5]).
+-export([read_and_add_records/5,read_and_add_records/1]).
 -export([whereis/0]).
-
+-export([list_commands2/3]).
 -define(LINEMAX, 30).
 -define(CHAR_MAX, 60).
 -define(DEF_HISTORY, 20).
@@ -85,12 +85,16 @@ start(NoCtrlG) ->
 
 start(NoCtrlG, StartSync) ->
     _ = code:ensure_loaded(user_default),
+
     Ancestors = [self() | case get('$ancestors') of
                               undefined -> [];
                               Anc -> Anc
                           end],
     spawn(fun() ->
                   put('$ancestors', Ancestors),
+                  put(gpt_conversation, none),
+                  _ = application:ensure_all_started(inets), application:ensure_all_started(ssl), 
+                  shell_gpt:start(),
                   server(NoCtrlG, StartSync)
           end).
 
@@ -336,50 +340,81 @@ get_command(Prompt, Eval, Bs, RT, FT, Ds) ->
                  )
         end,
     Pid = spawn_link(Parse),
+    %get_command1(Pid, Eval, Bs, RT, FT, Ds, 10000).
     get_command1(Pid, Eval, Bs, RT, FT, Ds).
 
-reconstruct(Fun, Name) ->
-    lists:flatten(erl_pp:expr(reconstruct1(Fun, Name))).
-reconstruct1({function, Anno, Name, Arity, Clauses}, Name) ->
-    {named_fun, Anno, 'RecursiveFuncVar', reconstruct1(Clauses, Name, Arity)}.
-reconstruct1([{call, Anno, {atom, Anno1, Name}, Args}|Body], Name, Arity) when length(Args) =:= Arity ->
-    [{call, Anno, {var, Anno1, 'RecursiveFuncVar'}, reconstruct1(Args, Name, Arity)}| reconstruct1(Body, Name, Arity)];
-reconstruct1([{call, Anno, {atom, Anno1, Name}, Args}|Body], Name, Arity) -> % arity not the same
-    [{call, Anno, {remote, Anno1, {atom, Anno1, shell_default}, {atom, Anno1, Name}}, reconstruct1(Args, Name, Arity)}|
-     reconstruct1(Body, Name, Arity)];
-reconstruct1([{call, Anno, {atom, Anno1, Fun}, Args}|Body], Name, Arity) -> % Name not the same
+function_to_fun(Fun, Name) ->
+    lists:flatten(erl_pp:expr(function_to_fun1(Fun, Name))).
+function_to_fun1({function, Anno, Name, Arity, Clauses}, Name) ->
+    {named_fun, Anno, 'RecursiveFuncVar', function_to_fun1(Clauses, Name, Arity)}.
+function_to_fun1([{call, Anno, {atom, Anno1, Name}, Args}|Body], Name, Arity) when length(Args) =:= Arity ->
+    [{call, Anno, {var, Anno1, 'RecursiveFuncVar'}, function_to_fun1(Args, Name, Arity)}| function_to_fun1(Body, Name, Arity)];
+function_to_fun1([{call, Anno, {atom, Anno1, Name}, Args}|Body], Name, Arity) -> % arity not the same
+    [{call, Anno, {remote, Anno1, {atom, Anno1, shell_default}, {atom, Anno1, Name}}, function_to_fun1(Args, Name, Arity)}|
+     function_to_fun1(Body, Name, Arity)];
+function_to_fun1([{call, Anno, {atom, Anno1, Fun}, Args}|Body], Name, Arity) -> % Name not the same
     case {edlin_expand:shell_default_or_bif(atom_to_list(Fun)), shell:local_func(Fun)} of
         {"user_defined", false} ->
-            [{call, Anno, {remote, Anno1, {atom, Anno1, shell_default}, {atom, Anno1, Fun}}, reconstruct1(Args, Name, Arity)}|
-             reconstruct1(Body, Name, Arity)];
+            [{call, Anno, {remote, Anno1, {atom, Anno1, shell_default}, {atom, Anno1, Fun}}, function_to_fun1(Args, Name, Arity)}|
+             function_to_fun1(Body, Name, Arity)];
         {"shell_default", false} ->
-            [{call, Anno, {remote, Anno1, {atom, Anno1, shell_default}, {atom, Anno1, Fun}}, reconstruct1(Args, Name, Arity)}| reconstruct1(Body, Name, Arity)];
+            [{call, Anno, {remote, Anno1, {atom, Anno1, shell_default}, {atom, Anno1, Fun}}, function_to_fun1(Args, Name, Arity)}| function_to_fun1(Body, Name, Arity)];
         {"erlang", false} ->
-            [{call, Anno, {remote, Anno1, {atom, Anno1, erlang}, {atom, Anno1, Fun}}, reconstruct1(Args, Name, Arity)}| reconstruct1(Body, Name, Arity)];
+            [{call, Anno, {remote, Anno1, {atom, Anno1, erlang}, {atom, Anno1, Fun}}, function_to_fun1(Args, Name, Arity)}| function_to_fun1(Body, Name, Arity)];
         {_, true} ->
-            [{call, Anno, {atom, Anno1, Fun}, reconstruct1(Args, Name, Arity)}| reconstruct1(Body, Name, Arity)]
+            [{call, Anno, {atom, Anno1, Fun}, function_to_fun1(Args, Name, Arity)}| function_to_fun1(Body, Name, Arity)]
     end;
-reconstruct1([E|Body], Name, Arity) when is_tuple(E) ->
-    [list_to_tuple(reconstruct1(tuple_to_list(E), Name, Arity))|reconstruct1(Body, Name, Arity)];
-reconstruct1([E|Body], Name, Arity) when is_list(E) ->
-    [reconstruct1(E, Name, Arity)|reconstruct1(Body, Name, Arity)];
-reconstruct1([E|Body], Name, Arity) ->
-    [E|reconstruct1(Body, Name, Arity)];
-reconstruct1([], _, _) -> [].
+function_to_fun1([E|Body], Name, Arity) when is_tuple(E) ->
+    [list_to_tuple(function_to_fun1(tuple_to_list(E), Name, Arity))|function_to_fun1(Body, Name, Arity)];
+function_to_fun1([E|Body], Name, Arity) when is_list(E) ->
+    [function_to_fun1(E, Name, Arity)|function_to_fun1(Body, Name, Arity)];
+function_to_fun1([E|Body], Name, Arity) ->
+    [E|function_to_fun1(Body, Name, Arity)];
+function_to_fun1([], _, _) -> [].
 
+semantic_error_gpt(Class, Reason, Stacktrace, _Eval, _Bs, RT, _FT, _Ds) ->
+    Cs = get(),
+    Cs1 = lists:filter(fun({{command, _},_}) -> true;
+                          ({{result, _},_}) -> true;
+                          (_) -> false
+                       end,
+                       Cs),
+    Cs2 = lists:map(fun({{T, N}, V}) -> {{N, T}, V} end,
+                    Cs1),
+    Cs3 = lists:keysort(1, Cs2),
+    History = lists:flatten(io_lib:format("~ts~n", [lists:flatten(list_commands2(Cs3, RT, []))])),
+    %History1 = lists:flatten(string:replace(History, "fd(", "\n\t")),
+    Error = lists:flatten(io_lib:format("~p~n", [{Class, {Reason,Stacktrace}}])),
+    group_leader() ! {send_to_shell_gpt, History, Error}.
+%%get_command1(Pid, Eval, Bs, RT, FT, Ds, Timeout) ->
 get_command1(Pid, Eval, Bs, RT, FT, Ds) ->
     receive
         {shell_state, From} ->
             From ! {shell_state, Bs, RT, FT},
             get_command1(Pid, Eval, Bs, RT, FT, Ds);
+        {shell_read_and_add_records, Mod} ->
+            read_and_add_records(Mod, '_', [], Bs, RT),
+            get_command1(Pid, Eval, Bs, RT, FT, Ds);
         {'EXIT', Pid, Res} ->
             {Res, Eval};
         {'EXIT', Eval, {Reason,Stacktrace}} ->
             report_exception(error, {Reason,Stacktrace}, RT),
+
+            semantic_error_gpt(error, Reason, Stacktrace, Eval, Bs, RT, FT, Ds),
+
             get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds);
         {'EXIT', Eval, Reason} ->
             report_exception(error, {Reason,[]}, RT),
+            semantic_error_gpt(error, Reason, [], Eval, Bs, RT, FT, Ds),
+            %erlang:display({Eval,{error, {Reason}}, check_and_get_history_and_results()}),
             get_command1(Pid, start_eval(Bs, RT, FT, Ds), Bs, RT, FT, Ds)
+        %{Group, background} -> ok;
+        %{Group, interrupt} -> ok    
+    % after
+    %     Timeout ->
+    %         io:format("This command seem to be taking quite long, you can put it to background or abort it with ctrl+z or ctrl+c"),
+    %         group_leader() ! {self(), Pid, listen_for_interrupt},
+    %         get_command1(Pid, Eval, Bs, RT, Ds, infinity)
     end.
 
 prompt(N, Eval0, Bs0, RT, FT, Ds0) ->
@@ -595,6 +630,8 @@ get_state() ->
             #shell_state{bindings = Bs, records = ets:tab2list(RT), functions = ets:tab2list(FT)}
     end.
 
+read_and_add_records(Mod) ->
+    whereis() ! {shell_read_and_add_records, Mod}.
 get_function(Func, Arity) ->
     {shell_state, _Bs, _RT, FT} = get_state(),
     try
@@ -642,10 +679,12 @@ shell_rep(Ev, Bs0, RT, FT, Ds0) ->
         {ev_exit,{Ev,Class,Reason0}} ->         % It has exited unnaturally
             receive {'EXIT',Ev,normal} -> ok end,
             report_exception(Class, Reason0, RT),
+            semantic_error_gpt(Class, Reason0, [], Ev, Bs0, RT, FT, Ds0),
             Reason = nocatch(Class, Reason0),
             {{'EXIT',Reason},start_eval(Bs0, RT, FT, Ds0), Bs0, Ds0};
         {ev_caught,{Ev,Class,Reason0}} ->       % catch_exception is in effect
             report_exception(Class, benign, Reason0, RT),
+            semantic_error_gpt(Class, Reason0, [], Ev, Bs0, RT, FT, Ds0),
             Reason = nocatch(Class, Reason0),
             {{'EXIT',Reason},Ev,Bs0,Ds0};
         {'EXIT',_Id,interrupt} ->               % Someone interrupted us
@@ -653,9 +692,11 @@ shell_rep(Ev, Bs0, RT, FT, Ds0) ->
             shell_rep(Ev, Bs0, RT, FT, Ds0);
         {'EXIT',Ev,{Reason,Stacktrace}} ->
             report_exception(exit, {Reason,Stacktrace}, RT),
+            semantic_error_gpt(exit, Reason, Stacktrace, Ev, Bs0, RT, FT, Ds0),
             {{'EXIT',Reason},start_eval(Bs0, RT, FT, Ds0), Bs0, Ds0};
         {'EXIT',Ev,Reason} ->
             report_exception(exit, {Reason,[]}, RT),
+            semantic_error_gpt(exit, Reason, [], Ev, Bs0, RT, FT, Ds0),
             {{'EXIT',Reason},start_eval(Bs0, RT, FT, Ds0), Bs0, Ds0};
         {'EXIT',_Id,R} ->
             exit(Ev, R),
@@ -672,6 +713,12 @@ nocatch(error, Reason) ->
 nocatch(exit, Reason) ->
     Reason.
 
+%% If we have support for LLM, then it could get as input the error, and suggest something new
+%% But we probably need to supply some context in the form of previous expressions leading up to this, if they are relevant
+%% (Sources of the Bindings)
+%% A = some_module:some_func("abc"),
+%% B = some_module:some_fault_is_thrown(A),
+%% Then in Bs we probably need to store {'A', "def", "some_module:some_func(\"abc\")"}
 report_exception(Class, Reason, RT) ->
     report_exception(Class, serious, Reason, RT).
 
@@ -786,7 +833,8 @@ exprs([E0|Es], Bs1, RT, Lf, Ef, Bs0, W) ->
                 Es =:= [] ->
                     VS = pp(V0, 1, RT),
                     case W of
-                        cmd -> io:requests([{put_chars, unicode, VS}, nl]);
+                        cmd -> %io:requests([{put_chars, unicode, VS++"\x1b]633;D\x07"}, nl]);
+                            io:requests([{put_chars, unicode, VS}, nl]);
                         pmt -> ok
                     end,
                     %% Don't send the result back if it will be
@@ -1089,10 +1137,11 @@ local_func(f, [_Other], _Bs, _Shell, _RT, _FT, _Lf, _Ef) ->
     erlang:raise(error, function_clause, [{shell,f,1}]);
 local_func(fl, [], Bs, _Shell, _RT, FT, _Lf, _Ef) ->
     {value, ets:tab2list(FT), Bs};
-local_func(fd, [{atom,_,FunName}, FunExpr], Bs, _Shell, _RT, FT, _Lf, _Ef) ->
+local_func(fd, [{atom,_,FunName}, FunExpr, {string, _, FunDef}], Bs, _Shell, _RT, FT, _Lf, _Ef) ->
     {value, Fun, []} = erl_eval:expr(FunExpr, []),
     {arity, Arity} = erlang:fun_info(Fun, arity),
     ets:insert(FT, [{{function, {shell_default, FunName, Arity}}, Fun}]),
+    ets:insert(FT, [{{function_definition, {shell_default, FunName, Arity}}, FunDef}]),
     {value, ok, Bs};
 local_func(fd, [_], _Bs, _Shell, _RT, _FT, _Lf, _Ef) ->
     erlang:raise(error, function_clause, [{shell, fd, 1}]);
@@ -1522,6 +1571,22 @@ list_commands([_D|Ds], RT) ->
     list_commands(Ds, RT);
 list_commands([], _RT) -> ok.
 
+list_commands2([{{N,command},Es0}, {{N,result}, V} |Ds], RT, Acc) ->
+    Es = prep_list_commands(Es0),
+    VS = pp(V, 4, RT),
+    Ns = io_lib:format("~w: ", [N]),
+    I = iolist_size(Ns),
+    Acc1 = Acc ++ io_lib:format("~ts~ts\n-> ~ts\n", [Ns, erl_pp:exprs(Es, I, enc()), VS]),
+    list_commands2(Ds, RT, Acc1);
+list_commands2([{{N,command},Es0} |Ds], RT, Acc) ->
+    Es = prep_list_commands(Es0),
+    Ns = io_lib:format("~w: ", [N]),
+    I = iolist_size(Ns),
+    Acc1 = Acc ++ io_lib:format("~ts~ts\n", [Ns, erl_pp:exprs(Es, I, enc())]),
+    list_commands2(Ds, RT, Acc1);
+list_commands2([_D|Ds], RT, Acc) ->
+    list_commands2(Ds, RT, Acc);
+list_commands2([], _RT, Acc) -> Acc.
 list_bindings([{Name,Val}|Bs], RT) ->
     case erl_eval:fun_data(Val) of
         {fun_data,_FBs,FCs0} ->

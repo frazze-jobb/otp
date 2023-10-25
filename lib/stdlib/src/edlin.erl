@@ -25,11 +25,12 @@
 -export([init/0,init/1,start/1,start/2,edit_line/2]).
 -export([erase_line/0,erase_inp/1,redraw_line/1]).
 -export([length_before/1,length_after/1,prompt/1]).
--export([current_line/1, current_chars/1]).
-
+-export([current_line/1, current_chars/1, after_cursor/1]).
+-export([biggest_width/1, add_padding_end/2]).
 -export([edit_line1/2]).
 -export([inverted_space_prompt/1]).
 -export([keymap/0]).
+-export([limit_column_width/2]).
 -import(lists, [reverse/1, reverse/2]).
 
 -export([over_word/3]).
@@ -166,18 +167,27 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                     end;
                 {ok, Value0} -> Value0
             end,
+            Cont = {line,P,MultiLine,{NextMode, none}},
             case Value of
+                {mode, Mode1} ->
+                    %erlang:display({mode, {Mode1,ShellMode}, Buf}),
+                    edit(Buf, P, MultiLine, {{Mode1, ShellMode}, none}, Rs0);
                 none -> edit(Cs, P, MultiLine, {normal,none}, Rs0);
-                search -> {search,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                search_found -> {search_found,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                search_cancel -> {search_cancel,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                search_quit -> {search_quit,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                open_editor -> {open_editor,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                history_up -> {history_up,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
-                history_down -> {history_down,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                gpt -> {gpt, Cs, Cont, reverse(Rs0)};
+                gpt_new_conversation -> {gpt_new_conversation, Cs, Cont, reverse(Rs0)};
+                gpt_switch_conversation -> {gpt_switch_conversation, Cs, Cont, reverse(Rs0)};
+                gpt_finish -> {gpt_finish, Cs, Cont, reverse(Rs0)};
+                gpt_quit -> {gpt_quit, Cs, Cont, reverse(Rs0)};
+                search -> {search,Cs,Cont,reverse(Rs0)};
+                search_found -> {search_found,Cs,Cont,reverse(Rs0)};
+                search_cancel -> {search_cancel,Cs,Cont,reverse(Rs0)};
+                search_quit -> {search_quit,Cs,Cont,reverse(Rs0)};
+                open_editor -> {open_editor,Cs,Cont,reverse(Rs0)};
+                history_up -> {history_up,Cs,Cont,reverse(Rs0)};
+                history_down -> {history_down,Cs,Cont,reverse(Rs0)};
                 new_line ->
                     MultiLine1 = {[lists:reverse(Bef)|LB],{[],Aft},LA},
-                    edit(Cs, P, MultiLine1, {normal, none}, reverse(redraw(P, MultiLine1, Rs0)));
+                    edit(Cs, P, MultiLine1, {NextMode, none}, reverse(redraw(P, MultiLine1, Rs0)));
                 new_line_finish ->
                     % Move to end
                     {{LB1,{Bef1,[]},[]}, Rs1} = do_op(end_of_expression, MultiLine, Rs0),
@@ -654,7 +664,37 @@ length_after({line,_,{_,{_Bef,Aft},_},_}) ->
 
 prompt({line,Pbs,_,_}) ->
     Pbs.
+split_string(Line, Width) ->
+    split_string(Line, Width, []).
+split_string([], _, Acc) ->
+    lists:reverse(Acc);
+split_string(String, Width, Acc) ->
+    case length(String) < Width of
+        true ->
+            lists:reverse([String | Acc]);
+        false ->
+            {Chunk, Rest} = lists:split(Width, String),
+            split_string(Rest, [Chunk | Acc])
+    end.
 
+limit_column_width(Paragraph, Width) ->
+    Lines = string:split(Paragraph,"\n",all),
+    add_padding_end(lists:join($\n, lists:map(fun(X) -> limit_column_width1(X, Width) end, Lines)), Width).
+limit_column_width1(Line, Width) ->
+    case Width < length(Line) of
+        true ->
+            split_string(Line, Width);
+        false ->
+            [Line]
+    end.
+biggest_width(Line) ->
+    Lines = string:split(Line,"\n",all),
+    lists:max([100, lists:max(lists:map(fun(X) -> length(X) end, Lines))]).
+add_padding_end(Line, W) ->
+    Lines = string:split(Line, "\n", all),
+    lists:join($\n, lists:map(fun(X) -> X++lists:duplicate(W-length(X), $\s) end, Lines)).
+after_cursor({line,_,{_,{_Bef,Aft},LA},_}) ->
+    current_line({[],{[],Aft},LA}).
 current_chars({line,_,MultiLine,_}) ->
     current_line(MultiLine).
 current_line({line,_,MultiLine,_}) ->

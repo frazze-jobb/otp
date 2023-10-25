@@ -166,7 +166,22 @@ key_map() -> #{
         tab_expand => #{
             "\t" => tab_expand_full,
             default => tab_expand_quit %% go to normal mode and evaluate key input again
+        },
+        gpt => #{
+            "\t" => tab_expand, %% TODO add support for autocomplete in plain text i.e. hej lis<tab> -> hej list or hej lists 
+            "\n" => new_line,
+            "\r" => new_line,
+            "\^[\n" => gpt_finish,
+            "\^[\r" => gpt_finish,
+            "\^[c" => gpt_quit,
+            "\^[a" => gpt_new_conversation,
+            "\^[s" => gpt_switch_conversation,
+            ")" => none,
+            "]" => none,
+            "}" => none,
+            default => {mode, normal}  %% when a {mode, normal} take the same keybindings as for the specified mode
         }
+
     }.
 
 normal_map() ->
@@ -214,6 +229,9 @@ normal_map() ->
         "\^[d" => kill_word,
         "\^[F" => forward_word,
         "\^[f" => forward_word,
+        "\^[r" => format_expression,
+        "\^[g" => gpt,
+        "\^[h" => help,
         "\^[L" => redraw_line,
         "\^[l" => redraw_line,
         "\^[o" => open_editor,
@@ -287,14 +305,17 @@ valid_functions() ->
      clear_line,           %% Clear the current expression
      end_of_expression,    %% Move to the end of the expression
      end_of_line,          %% Move to the end of the line
+     format_expression,    %% Format the current expression
      forward_char,         %% Move forward one character
      forward_delete_char,  %% Delete the character under the cursor
      forward_delete_word,  %% Delete the characters until the closest non-word character
      forward_line,         %% Move forward one line
      forward_word,         %% Move forward one word
+     gpt_quit,             %% Quit the current conversation
      history_down,         %% Move to the next item in the history
      history_up,           %% Move to the previous item in the history
-     %%jcl_menu,
+     %%jcl_menu,    %% TODO: let all keys fall through here, and then send it back to user_drv that it should enter
+     %% a new mode
      kill_line,            %% Delete all characters from the cursor to the end of the line and save them in the kill buffer
      kill_word,            %% Delete the word behind the cursor and save it in the kill buffer
      new_line_finish,      %% Add a newline at the end of the line and try to evaluate the current expression
