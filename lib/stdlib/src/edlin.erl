@@ -172,6 +172,7 @@ edit(Buf, P, {LB, {Bef,Aft}, LA}=MultiLine, {ShellMode, EscapePrefix}, Rs0) ->
                 search_found -> {search_found,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 search_cancel -> {search_cancel,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 search_quit -> {search_quit,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
+                format_expression -> {format_expression,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 open_editor -> {open_editor,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 history_up -> {history_up,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
                 history_down -> {history_down,Cs,{line,P,MultiLine,{normal, none}},reverse(Rs0)};
