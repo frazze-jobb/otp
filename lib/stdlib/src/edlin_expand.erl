@@ -606,23 +606,13 @@ expand_nesting_content(T, Constraints, Nestings, Section) ->
                                               {list, NestingArgs1, Unfinished1} -> {list, Unfinished1, NestingArgs1};
                                               {map, _, _, NestingArgs1, Unfinished1} -> {map, Unfinished1, NestingArgs1}
                                           end,
-    %% in the case of
-    %% erlang:system_info({allocator, ) 
-    %% we have a tuple nesting with an atom
-    %% this should give us "allocator" in the nestingsargs, and empty unfinished part
-    %% but we also know that we have a nesting, if we expect something other than a tuple, we shouldnt print that function
-    %% lets call it NestingType
-    %% now when that is fixed, how do we filter {allocator_sizes, ...} and others
     Types = [Ts || Ts <- edlin_type_suggestion:get_types(Constraints, T, lists:droplast(Nestings), [no_print]) ],
     case UnfinishedNestingArg of
         [] ->
             case find_type(Types, [NestingType]) of
                 true -> 
-                    %% if we know had a tuple, {allocator_sizes, } will be allowed
-                    %% probably get_arity will return none
                     Nestings2 = add_to_last_nesting({var, "Var"}, Nestings),
                     NestingArities = edlin_type_suggestion:get_arity(Constraints, T, Nestings2),
-                    
                     fold_results([begin
                         case NestingArity of
                             none -> {no, [], []};
