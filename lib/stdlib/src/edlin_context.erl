@@ -65,6 +65,7 @@
                | {fun_, Mod, Fun} %% cursor is in a fun mod:fun statement
                | {new_fun, Unfinished}
                | {function}
+               | {function, Mod}
                | {function, Mod, Fun, Args, Unfinished, Nesting}
                | {map, Binding, Keys}
                | {map_or_record}
@@ -211,7 +212,8 @@ get_context([$:|Bef2], _) ->
     {Bef3, Mod} = edlin_expand:over_word(Bef2),
     case edlin_expand:over_word(Bef3) of
         {_, "fun"} -> {fun_, Mod};
-        _ -> {function}
+        _ when Mod =:= [] -> {function};
+        _ -> {function, Mod}
     end;
 get_context([$/|Bef1], _) ->
     {Bef2, Fun} = edlin_expand:over_word(Bef1),
@@ -590,7 +592,7 @@ over_to_opening_paren([CC|Stack], [CC|Bef], Word) -> %% Nested parenthesis of sa
 over_to_opening_paren(Stack, [Q,NEC|Bef], Word) when Q == $"; Q == $', NEC /= $$, NEC /= $\\ ->
     %% Consume the whole quoted text, it may contain parenthesis which
     %% would have confused us.
-    {Bef1, QuotedWord} = over_to_opening_quote(Q, Bef),
+    {Bef1, QuotedWord} = over_to_opening_quote(Q, [NEC|Bef]),
     over_to_opening_paren(Stack, Bef1, QuotedWord ++ Word);
 over_to_opening_paren(CC, [C|Bef], Word) -> over_to_opening_paren(CC, Bef, [C|Word]).
 

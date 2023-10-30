@@ -54,6 +54,7 @@
         %% Put text in expansion area
         {put_expand, unicode, binary()} |
         {put_expand_no_trim,  unicode, binary()} |
+        {move_expand, -32768..32767} |
         %% Move the cursor X characters left or right (negative is left)
         {move_rel, -32768..32767} |
         %% Move the cursor Y rows up or down (negative is up)
@@ -793,6 +794,8 @@ io_request({put_expand, unicode, Chars}, TTY) ->
     write(prim_tty:handle_request(TTY, {expand_with_trim, unicode:characters_to_binary(Chars)}));
 io_request({put_expand_no_trim, unicode, Chars}, TTY) ->
     write(prim_tty:handle_request(TTY, {expand, unicode:characters_to_binary(Chars)}));
+io_request({move_expand, N}, TTY) ->
+    write(prim_tty:handle_request(TTY, {move_expand, N}));
 io_request({move_rel, N}, TTY) ->
     write(prim_tty:handle_request(TTY, {move, N}));
 io_request({move_line, R}, TTY) ->

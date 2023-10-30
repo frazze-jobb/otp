@@ -143,6 +143,7 @@
                 buffer_before = [],  %% Current line before cursor in reverse
                 buffer_after = [],   %% Current line after  cursor not in reverse
                 buffer_expand,       %% Characters in expand buffer
+                buffer_expand_row = 1,
                 cols = 80,
                 rows = 24,
                 xn = false,
@@ -593,7 +594,7 @@ handle_request(State, redraw_prompt) ->
     {ClearLine, _} = handle_request(State, delete_line),
     {Redraw, NewState} = handle_request(State, redraw_prompt_pre_deleted),
     {[ClearLine, Redraw], NewState};
-handle_request(State = #state{unicode = U, cols = W}, redraw_prompt_pre_deleted) ->
+handle_request(State = #state{unicode = U, cols = W, rows = R}, redraw_prompt_pre_deleted) ->
     {Movement, TextInView, EverythingFitsInView} = in_view(State),
     {_, NewPrompt} = handle_request(State, new_prompt),
     {Redraw, RedrawState} = insert_buf(NewPrompt, unicode:characters_to_binary(TextInView)),
@@ -607,17 +608,53 @@ handle_request(State = #state{unicode = U, cols = W}, redraw_prompt_pre_deleted)
                             true when Last =/= [] -> cols(Last, U);
                             _ -> cols(State#state.buffer_before, U) + cols(State#state.buffer_after,U)
                           end,
-                          {ExpandBuffer, NewState} = insert_buf(RedrawState#state{ buffer_expand = [] }, iolist_to_binary(BufferExpand)),
+                          ERow = State#state.buffer_expand_row,
+
+                            BufferExpandLines = string:split(erlang:binary_to_list(BufferExpand), "\n", all),
+                            InputRows = (cols_multiline([State#state.buffer_before ++ State#state.buffer_after], W, U) div W),
+                            ExpandRows = (cols_multiline(BufferExpandLines, W, U) div W),
+                            BufferExpand1 = case ExpandRows > (R-InputRows) of
+                                true -> StatusLine = io_lib:format("\e[37;46mrows ~w to ~w of ~w\e[0m", [ERow, ERow + R-1-InputRows, ExpandRows]),
+                                        Cols1 = max(0,W*(R-1-InputRows)),
+                                        Cols0 = max(0,W*(ERow-1)),
+                                        {_, _, BufferExpandLinesInViewStart, {_, BEStartIVHalf}} = split_cols_multiline(Cols0, BufferExpandLines, U, W),
+                                        {_, BufferExpandLinesInViewRev, _, {BEIVHalf, _}} = split_cols_multiline(Cols1, BufferExpandLinesInViewStart++[BEStartIVHalf], U, W),
+                                        BEIVHalf1 = case BEIVHalf of [] -> [];
+                                            _ -> [BEIVHalf]
+                                        end,
+                                        ExpandInView = lists:reverse(BEIVHalf1++BufferExpandLinesInViewRev),
+                                        ["\r\n",lists:join("\n", ExpandInView ++ [StatusLine])];
+                                false ->
+                                    ["\r\n",BufferExpand]
+                                end,
+                          {ExpandBuffer, NewState} = insert_buf(RedrawState#state{ buffer_expand = [] }, iolist_to_binary(BufferExpand1)),
                           BECols = cols(W, End, NewState#state.buffer_expand, U),
                           MoveToEnd = move_cursor(RedrawState, BECols, End),
                           {[encode(Redraw,U),encode(ExpandBuffer, U), MoveToEnd, Movement], RedrawState}
                   end,
     {Output, State};
+handle_request(State = #state{ buffer_expand = Expand, buffer_expand_row = ERow, cols = W, rows = WindowRows, unicode = U}, {move_expand, N}) ->
+    %% Get number of Lines in terminal window
+    BufferExpandLines = case Expand of
+        undefined -> [];
+        _ -> string:split(erlang:binary_to_list(Expand), "\n", all)
+    end,
+    ExpandRows = (cols_multiline(BufferExpandLines, W, U) div W),
+    InputRows = (cols_multiline([State#state.buffer_before ++ State#state.buffer_after], W, U) div W),
+    ERow1 = if ExpandRows > WindowRows-InputRows -> %% We need to page expand rows
+        min(ExpandRows-(WindowRows-InputRows-1),max(1,ERow + N));
+        true -> 1 %% No need to page expand rows
+    end,
+    if ERow =:= ERow1 -> %% We don't need to do anything
+        {[], State};
+        true ->
+            handle_request(State#state{buffer_expand_row = ERow1}, redraw_prompt)
+    end;
 %% Clear the expand buffer after the cursor when we handle any request.
 handle_request(State = #state{ buffer_expand = Expand, unicode = U}, Request)
   when Expand =/= undefined ->
-    {Redraw, NoExpandState} = handle_request(State#state{ buffer_expand = undefined }, redraw_prompt),
-    {Output, NewState} = handle_request(NoExpandState#state{ buffer_expand = undefined }, Request),
+    {Redraw, NoExpandState} = handle_request(State#state{ buffer_expand = undefined, buffer_expand_row = 1 }, redraw_prompt),
+    {Output, NewState} = handle_request(NoExpandState#state{ buffer_expand = undefined, buffer_expand_row = 1 }, Request),
     {[encode(Redraw, U), encode(Output, U)], NewState};
 handle_request(State, new_prompt) ->
     {"", State#state{buffer_before = [],
@@ -629,7 +666,7 @@ handle_request(State, {expand, Expand}) ->
     handle_request(State#state{buffer_expand = Expand}, redraw_prompt);
 handle_request(State, {expand_with_trim, Binary}) ->
     handle_request(State, 
-                   {expand, iolist_to_binary(["\r\n",string:trim(Binary, both)])});
+                   {expand, iolist_to_binary([string:trim(Binary, both)])});
 %% putc prints Binary and overwrites any existing characters
 handle_request(State = #state{ unicode = U }, {putc, Binary}) ->
     %% Todo should handle invalid unicode?
@@ -917,7 +954,7 @@ in_view(#state{lines_after = LinesAfter, buffer_before = Bef, buffer_after = Aft
     InputAfterRows = (cols_multiline(LinesAfter, W, U) div W),
     %% Dont print lines after if we have expansion rows
     SumRows = InputBeforeRows+ InputRows + ExpandRows + InputAfterRows,
-    if SumRows > R -> 
+    if SumRows > R ->
             RowsLeftAfterInputRows = R - InputRows,
             RowsLeftAfterExpandRows = RowsLeftAfterInputRows - ExpandRows,
             RowsLeftAfterInputBeforeRows = RowsLeftAfterExpandRows - InputBeforeRows,
