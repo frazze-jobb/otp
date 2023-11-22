@@ -579,6 +579,12 @@ handle_request(State = #state{ options = #{ tty := false } }, Request) ->
         _Ignore ->
             {<<>>, State}
     end;
+handle_request(State, {redraw_prompt_with_color, Buffer}) ->
+    {Movement, _TextInView, _EverythingFitsInView} = in_view(State),
+    {ClearLine, Cleared} = handle_request(State, delete_line),
+    {_DrawWithColor, RedrawState} = insert_buf(Cleared, unicode:characters_to_binary(Buffer)),
+    {RedrawWithExpand, _NewState} = handle_request(RedrawState#state{buffer_expand = State#state.buffer_expand}, redraw_prompt_pre_deleted),
+    {[ClearLine, RedrawWithExpand, Movement], State};
 handle_request(State, {redraw_prompt, Pbs, Pbs2, {LB, {Bef, Aft}, LA}}) ->
     {ClearLine, Cleared} = handle_request(State, delete_line),
     CL = lists:reverse(Bef,Aft),

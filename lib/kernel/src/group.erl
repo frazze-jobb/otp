@@ -530,7 +530,8 @@ get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
                 {[CL|LB], _, _} ->
                     LineCont1 = {LB,{lists:reverse(CL++"\n"), []},[]},
                     MultiLinePrompt = lists:duplicate(shell:prompt_width(Pbs), $\s),
-                    send_drv_reqs(Drv, [{redraw_prompt, Pbs, MultiLinePrompt, LineCont1},new_prompt]);
+                    send_drv_reqs(Drv, [{redraw_prompt, Pbs, MultiLinePrompt, LineCont1} | edlin:color(Pbs, MultiLinePrompt, LineCont1)]),
+                    send_drv_reqs(Drv, [{insert_chars, unicode, "\n"}, new_prompt]);
                 _ -> skip %% oldshell mode
             end,
             _ = case {M,F} of
@@ -791,6 +792,7 @@ get_line1({What,{line,Prompt,{_,{RevCmd0,_},_},{search, none}},_Rs},
     more_data(What, Cont, Drv, Shell, Ls, Encoding);
 get_line1({What,Cont0,Rs}, Drv, Shell, Ls, Encoding) ->
     send_drv_reqs(Drv, Rs),
+    send_drv_reqs(Drv, edlin:color(Cont0)),
     more_data(What, Cont0, Drv, Shell, Ls, Encoding).
 
 more_data(What, Cont0, Drv, Shell, Ls, Encoding) ->

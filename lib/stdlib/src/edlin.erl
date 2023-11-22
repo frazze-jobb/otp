@@ -26,7 +26,7 @@
 -export([erase_line/0,erase_inp/1,redraw_line/1]).
 -export([length_before/1,length_after/1,prompt/1]).
 -export([current_line/1, current_chars/1]).
-
+-export([color/1, color/3]).
 -export([edit_line1/2]).
 -export([keymap/0]).
 -import(lists, [reverse/1, reverse/2]).
@@ -611,6 +611,46 @@ erase(Pbs, {_,{Bef, Aft},_}, Rs) ->
 
 redraw_line({line, Pbs, L,_}) ->
     redraw(Pbs, L, []).
+color({line, Pbs, {_LB,{_Bef,_},_}=L, _}) ->
+    color(Pbs, multi_line_prompt(Pbs), L).
+color(Pbs, MultilinePrompt, L) ->
+    ColorCommand = application:get_env(stdlib, shell_syntax_highlight_func),
+    Buffer = current_line(L),
+    try
+        case ColorCommand of
+            {ok, {M,F}} when is_atom(M), is_atom(F) ->
+                ColorizedCode = M:F(Buffer),
+                Expression = Pbs ++ lists:flatten(
+                    lists:join(
+                        "\n"++MultilinePrompt, string:split(lists:droplast(ColorizedCode), "\n"))),
+                [{redraw_prompt_with_color, Expression}];
+            {ok, ColorCommand1} when is_list(ColorCommand1) ->
+                case color_command(Buffer, ColorCommand1) of
+                    ["/bin/sh"|_] -> []; %%skip coloring
+                    ColorizedCode ->
+                        Expression = Pbs ++ lists:flatten(
+                            lists:join(
+                                "\n"++MultilinePrompt, string:split(lists:droplast(ColorizedCode), "\n"))),
+                         [{redraw_prompt_with_color, Expression}]
+                end
+        end
+    catch
+        _:_ -> []
+    end.        
+    
+color_command(Buffer, Command) ->
+    MkTemp = case os:type() of
+        {win32, _} ->
+            os:cmd("powershell \"write-host (& New-TemporaryFile | Select-Object -ExpandProperty FullName)\"");
+        {unix,_} ->
+            os:cmd("mktemp")
+    end,
+    TmpFile = string:chomp(MkTemp),
+    _ = file:write_file(TmpFile, unicode:characters_to_binary(Buffer, unicode)),
+    Command1 = string:replace(Command, "${file}", TmpFile),
+    Content = os:cmd(Command1),
+    _ = file:del_dir_r(TmpFile),
+    Content.
 
 multi_line_prompt(Pbs) ->
     case application:get_env(stdlib, shell_multiline_prompt, default) of

@@ -773,6 +773,8 @@ group_opts() ->
           {term(), reference(), prim_tty:state()}.
 io_request({requests,Rs}, TTY) ->
     {noreply, io_requests(Rs, TTY)};
+io_request({redraw_prompt_with_color, Buffer}, TTY) ->
+    write(prim_tty:handle_request(TTY, {redraw_prompt_with_color, Buffer}));
 io_request(redraw_prompt, TTY) ->
     write(prim_tty:handle_request(TTY, redraw_prompt));
 io_request({redraw_prompt, Pbs, Pbs2, LineState}, TTY) ->
