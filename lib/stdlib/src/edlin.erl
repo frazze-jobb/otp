@@ -27,10 +27,11 @@
 -export([length_before/1,length_after/1,prompt/1]).
 -export([current_line/1, current_chars/1]).
 -export([color/1, color/3]).
+-export([text_mate_grammar/2, erlang_grammar/1]).
 -export([edit_line1/2]).
 -export([keymap/0]).
 -import(lists, [reverse/1, reverse/2]).
-
+-include_record("xmerl.hrl").
 -export([over_word/3]).
 
 -type keymap() :: #{atom() => #{string()|default => atom()}}.
@@ -622,7 +623,7 @@ color(Pbs, MultilinePrompt, L) ->
                 ColorizedCode = M:F(Buffer),
                 Expression = Pbs ++ lists:flatten(
                     lists:join(
-                        "\n"++MultilinePrompt, string:split(lists:droplast(ColorizedCode), "\n"))),
+                        "\n"++MultilinePrompt, string:split(ColorizedCode, "\n"))),
                 [{redraw_prompt_with_color, Expression}];
             {ok, ColorCommand1} when is_list(ColorCommand1) ->
                 case color_command(Buffer, ColorCommand1) of
@@ -630,7 +631,7 @@ color(Pbs, MultilinePrompt, L) ->
                     ColorizedCode ->
                         Expression = Pbs ++ lists:flatten(
                             lists:join(
-                                "\n"++MultilinePrompt, string:split(lists:droplast(ColorizedCode), "\n"))),
+                                "\n"++MultilinePrompt, string:split(string:trim(ColorizedCode, trailing), "\n"))),
                          [{redraw_prompt_with_color, Expression}]
                 end
         end
@@ -651,6 +652,309 @@ color_command(Buffer, Command) ->
     Content = os:cmd(Command1),
     _ = file:del_dir_r(TmpFile),
     Content.
+event_function({ignorableWhitespace,_},_,S) -> S;
+event_function({startElement,[],"dict",{[],"dict"},[]},_,S =#{parent_stack := ParentStack, key_name := Name}) ->
+                    S#{parent_stack := [#{type=>dict, key=>Name, dict => #{}}|ParentStack], key_name := undefined};
+event_function({startElement,[],"array",{[],"array"},[]},_,S =#{parent_stack := ParentStack, key_name := Name}) ->
+                    S#{parent_stack := [#{type=>array, key=>Name, array => []}|ParentStack], key_name := undefined};
+event_function({startElement,[],"key",{[],"key"},[]}, _, S) ->
+                    S#{record_key => 1};
+event_function({characters,Cs}, _, S = #{record_key := 1}) ->
+                    S#{key_name => Cs};
+event_function({endElement,[],"key",{[],"key"}}, _, S = #{record_key := 1}) ->
+                    S#{record_key => 0};
+event_function({startElement,[],"string",{[],"string"},[]}, _, S) ->
+                    S#{record_string => 1};
+event_function({characters,Cs}, _, S = #{record_string := 1}) ->
+                    S#{string_value => Cs};
+event_function({endElement,[],"string",{[],"string"}}, _, S = #{parent_stack := [Parent=#{type:=dict,dict:=Dict}|Stack], key_name := Name, string_value := Value}) when Name =/= undefined ->
+                    Parent1 = Parent#{dict => Dict#{Name => Value}},
+                    S#{parent_stack := [Parent1|Stack], string_value := undefined, record_string := 0, key_name := undefined};
+event_function({endElement,[],"string",{[],"string"}}, _, S = #{parent_stack := [Parent=#{type:=array,array:=Array}|Stack], string_value := Value}) ->
+                    Parent1 = Parent#{array => Array ++ [Value]},
+                    S#{parent_stack := [Parent1|Stack], string_value := undefined, record_string := 0};
+event_function({endElement,[],"dict",{[],"dict"}}, _, S = #{parent_stack := [#{type:=dict, dict:=Dict}]}) ->
+                    S#{final => Dict, parent_stack := []};
+event_function({endElement,[],"dict",{[],"dict"}}, _,
+                    S = #{parent_stack := [#{type:=dict, key:=undefined, dict:=Dict}, #{type:=array, array:=Array}=Parent|Stack]}) ->
+                    S#{parent_stack := [Parent#{array := Array ++ [Dict]}|Stack]};
+event_function({endElement,[],"dict",{[],"dict"}}, _,
+                    S = #{parent_stack := [#{type:=dict, key:=Key, dict:=Dict}, #{type:=dict, dict:=Dict1}=Parent|Stack]}) ->
+                    S#{parent_stack := [Parent#{dict := Dict1#{Key => Dict}}|Stack]};
+event_function({endElement,[],"array",{[],"array"}}, _,
+                    S = #{parent_stack := [#{type:=array, key:=undefined, array:=Array},#{type:=array, array:=Array1}=Parent|Stack]}) ->
+                    S#{parent_stack := [Parent#{array := Array1 ++ [Array]}|Stack]};
+event_function({endElement,[],"array",{[],"array"}}, _,
+                    S = #{parent_stack := [#{type:=array, key := Name, array:=Array},#{type:=dict, dict:=Dict}=Parent|Stack]}) ->
+                    S#{parent_stack := [Parent#{dict := Dict#{Name => Array}}|Stack]};
+event_function(_, _, S) ->
+                    S.
+erlang_grammar(Buffer) ->
+    text_mate_grammar(Buffer, "/home/efrfred/otp/lib/stdlib/src/Erlang.plist").
+text_mate_grammar(Buffer, Plist) ->
+    Cached = get({cache, Plist}),
+    case Cached of
+        undefined ->
+            State = #{parent_stack => [], key_name => undefined, string_value => undefined, record_key => 0, record_string => 0, final => undefined},
+            {ok, #{final := Final}, <<>>} = xmerl_sax_parser:file(Plist,
+                [{event_state, State},
+                 {event_fun, fun event_function/3}]),
+            put({cache, Plist}, Final),
+            Final;
+        Final ->
+            Final
+    end,
+    text_mate_grammar1(Buffer, Final).
+
+text_mate_grammar1(Buffer, Final) ->
+    %% Now the plist is parsed, we are now interested in testing regexes on the string and see
+    %% which one we matched the most?
+    #{"repository" := Repository, "patterns" := Patterns} = Final,
+    Classes = classify(Buffer,Patterns, Repository),
+    erlang:display(Classes),
+    %% VSCode has something that they call modifiers like (exported functions) which determines if something should be underlined or not
+    MarkupMap = #{
+        "entity.name.function" => [{fontstyle, [underline]},
+                                   {foreground, "\e[90m"}],
+        "entity.name.type" => [{fontstyle, [underline]},
+                               {foreground, "\e[91m"}],
+        "keyword" => [{foreground, "\e[92m"}],
+        "keyword.operator" =>[{foreground, "\e[93m"}],
+        "string" =>[{foreground, "\e[94m"}],
+        "punctuation" =>[{foreground, "\e[95m"}],
+        "constant.other.symbol" => [{foreground, "\e[96m"}],
+        "constant.chatacter" => [{foreground, "\e[97m"}],
+        "constant.numeric" => [{foreground, "\e[97m"}],
+        "variable" =>[{foreground, "\e[98m"}]
+    },
+    %% Now insert ansi escape sequences at the indexes provided by Classes
+    MarkupActions = [{Ix, markup(Class, MarkupMap)}||{Ix, Class} <- Classes],
+    erlang:display({markupactions, MarkupActions}),
+    apply_markup(Buffer, 0, MarkupActions, []).
+
+%% Clear after last markup, NOTE that we cant have nested markups if that is the case
+%% the outer markup may be cleared in the end of the inner markup.
+%% TODO: This no longer works because we have classes within classes...
+apply_markup(Buffer, Index, [{{Index,_},clear}|MarkupList], Acc) ->
+    apply_markup(Buffer, Index, MarkupList, ["\e[0m"|Acc]);
+apply_markup(Buffer, Index, [{{Index,_},clear},|MarkupList], Acc) ->
+    apply_markup(Buffer, Index, MarkupList, ["\e[0m"|Acc]);
+apply_markup([],_,_,Acc) ->
+    lists:flatten(lists:reverse(Acc));
+%% Discard 0 length markups the will not be visible
+apply_markup(Buffer, Index, [{{_,0},_}|MarkupList], Acc) ->
+    apply_markup(Buffer, Index, MarkupList, Acc);
+%% We should apply the markup here including C, NOTE that ACC is the buffer in reverse
+apply_markup([C|Buffer], Index, [{{Index,Length},Markup}|MarkupList], Acc) ->
+    erlang:display({insert_at, Index}),
+    apply_markup(Buffer, Index+1, [{{Index+Length,ignore}, clear}|MarkupList], [C,Markup|Acc]);
+apply_markup([C|Buffer], Index, MarkupList, Acc) ->
+    apply_markup(Buffer, Index+1, MarkupList, [C|Acc]).
+markup(Class, MarkupMap) ->
+    case maps:get(Class, MarkupMap, none) of
+        none ->
+            case string:split(Class, ".", trailing) of
+                [Class1, _] -> markup(Class1, MarkupMap);
+                [Class1] -> case maps:get(Class1, MarkupMap, none) of
+                    none -> "";
+                    Markup -> mu(Markup)
+                end
+            end;
+        Markup ->
+            mu(Markup)
+    end.
+mu(Markup) ->
+    AppliedFontStyle = case proplists:get_value(fontstyle, Markup, none) of
+        none -> [];
+        FontStyles ->
+            [fontstyle2ansi(FS) || FS <- FontStyles]
+    end,
+    AppliedForeground = case proplists:get_value(foreground, Markup, none) of
+        none -> [];
+        Foreground ->
+            color2ansi(fg, Foreground)
+    end,
+    AppliedBackground = case proplists:get_value(background, Markup, none) of
+        none -> [];
+        Background ->
+            color2ansi(bg, Background)
+    end,
+    AppliedFontStyle ++ AppliedForeground ++ AppliedBackground.
+
+fontstyle2ansi(bold) -> "\e[1m";
+fontstyle2ansi(italic) -> "\e[3m";
+fontstyle2ansi(underline) -> "\e[4m";
+fontstyle2ansi(strikethrough) -> "\e[9m";
+fontstyle2ansi(_) -> "".
+color2ansi(Type, [$#,Rx1,Rx2,Gx1,Gx2,Bx1,Bx2]) ->
+    R = integer_to_list(list_to_integer([Rx1,Rx2], 16), 10),
+    G = integer_to_list(list_to_integer([Gx1,Gx2], 16), 10),
+    B = integer_to_list(list_to_integer([Bx1,Bx2], 16), 10),
+    Prefix = case Type of
+        bg -> "\e[48;2;";
+        fg -> "\e[38;2;"
+    end,
+    Prefix ++lists:flatten([R,$;,G,$;,B])++"m";
+color2ansi(_, [$\e|_]=SystemColor) ->
+    %% NOTE: This is when user already specified the ansi sequence
+    SystemColor.
+%% This below is when you have specified a system color with a name
+%% implemented in prim_tty
+% color2ansi(Type, SystemColor) ->
+%     case Type of
+%         fg -> prim_tty:fg_color(SystemColor);
+%         bg -> prim_tty:bg_color(SystemColor)
+%     end.
+
+classify(Buffer, Patterns, Repository) ->
+    put(run_before, #{}),
+    put(repository, Repository),
+    Classes = [Class || {_,_}=Class <- lists:uniq(lists:sort(lists:flatten([begin
+        %erlang:display({classify, Pattern, returned, classify1(Buffer, [Pattern], [])}),
+        %erlang:display({finish, Class}),
+        classify1(Buffer, [Pattern], [])
+        
+    end || Pattern <- Patterns])))],
+    %% Classes is a list of {{offset, length}, ClassName}
+    %% ClassName can later be used to get a color
+    erlang:display({classify, returned, Classes}),
+    put(run_before, undefined),
+    Classes.
+classify1(_, [], _) ->
+    [];
+classify1(Buffer, [#{"patterns" := Patterns1}=P|_Patterns], Repository) when map_size(P) =:= 1 ->
+    Classes = [Class || {_,_}=Class <- lists:uniq(lists:sort(lists:flatten([begin
+        %erlang:display({patterns, Class}),
+        classify1(Buffer, [Pattern], Repository)
+    end || Pattern <- Patterns1 ])))],
+    erlang:display({classify, patterns, Buffer, returned, Classes}),Classes;
+    % case Classes of
+    %     [] -> classify1(Buffer, Patterns, Repository);
+    %     _ -> Classes
+    % end;
+classify1(Buffer, [#{"include" := [$#|Include]}|Patterns], Repository) ->
+    RunBefore = get(run_before),
+    %erlang:display(RunBefore),
+    case maps:get({Buffer, Include}, RunBefore, none) of
+        none ->
+            Pattern = maps:get(Include, get(repository)),
+            erlang:display({inside, Buffer, Include}),
+            put(run_before, RunBefore#{{Buffer, Include} => true}),
+            R = lists:flatten(classify1(Buffer, [Pattern|Patterns], Repository)),
+            put(run_before, RunBefore#{{Buffer, Include,content} => R}),
+            %put(run_before, RunBefore#{{Buffer, Include} => R}),
+            erlang:display({classify, Buffer, Include, returned, R}),
+            R;
+        _ ->
+            []
+    end;
+classify1(Buffer,[#{"begin" := BegPattern,
+                     "end" := EndPattern}=P|Patterns], Repository) ->
+    %% TODO, first check BegPattern, then if we match check the rest
+    case re:run(Buffer, BegPattern ++ "(.*?)" ++ EndPattern, [{capture, all, index}, global]) of
+        {match, ListMatch} ->
+            R = lists:flatten([begin
+                
+            %erlang:display({match, BegPattern ++ "(.*)" ++ EndPattern, Captures}),
+            {Captures1, _BeginCaptures} = case maps:get("beginCaptures", P, []) of
+                [] -> case maps:get("captures", P, []) of
+                    [] -> {[], []};
+                    CapturesMap ->
+                        Keys = maps:keys(CapturesMap),
+                        {[{lists:nth(list_to_integer(Key), Captures), maps:get("name", maps:get(Key, CapturesMap))} || Key <- Keys], CapturesMap}
+                    end;
+                CapturesMap ->
+                    Keys = maps:keys(CapturesMap),
+                    {[{lists:nth(list_to_integer(Key), Captures), maps:get("name", maps:get(Key, CapturesMap))} || Key <- Keys], CapturesMap}
+            end,
+            NBeginCaptures = length(Captures1),
+            ContentCapture = lists:nth(NBeginCaptures+1, Captures),
+            {Captures2, _EndCaptures} = case maps:get("endCaptures", P, []) of
+                [] -> case maps:get("captures", P, []) of
+                    [] -> {[], []};
+                    CapturesMap1 ->
+                        Keys1 = maps:keys(CapturesMap1),
+                        {[{lists:nth(list_to_integer(Key)+NBeginCaptures+1, Captures), maps:get("name", maps:get(Key, CapturesMap1))} || Key <- Keys1], CapturesMap1}
+                    end;
+                CapturesMap1 ->
+                    Keys1 = maps:keys(CapturesMap1),
+                    {[{lists:nth(list_to_integer(Key)+NBeginCaptures+1, Captures), maps:get("name", maps:get(Key, CapturesMap1))} || Key <- Keys1], CapturesMap1}
+            end,
+            FirstCaptureClass = case maps:get("name", P, undefined) of
+                undefined ->
+                    [];
+                ClassName ->
+                    [{First, ClassName}]
+            end,
+            case maps:get("contentName", P, undefined) of
+                undefined ->
+                    case maps:get("patterns", P, []) of
+                        [] ->
+                            FirstCaptureClass ++ Captures1 ++ Captures2;
+                        Patterns1 ->
+                            {Offset1, Length1} = First,
+                            SS = string:slice(Buffer, Offset1, Length1),
+                            erlang:display({checking_content_patterns, SS}),
+                            %% According to documentation, patterns should be applied on where the start matches until the end matches or end of the document
+                            %% But we do not want to run the function twice
+                            ContentCaptures = lists:uniq(lists:sort([
+                                begin
+                                    Class
+                                end || Pattern <- Patterns1, {_,_}=Class <- classify1(SS, [Pattern], Repository)])),
+                            erlang:display({done_checking_content_patterns, ContentCaptures}),
+                            %% ContentCaptures is a list of {{offset, length}, ClassName}
+                            %% add the ContentOffset to the offset of each capture
+                            ContentCaptures1 = [{{Offset+Offset1, Length}, ClassName} || {{Offset, Length}, ClassName} <- ContentCaptures],   
+                            FirstCaptureClass ++ Captures1 ++ ContentCaptures1 ++ Captures2
+                    end;
+                ContentName ->
+                    FirstCaptureClass ++ Captures1 ++ [{ContentCapture, ContentName}] ++ Captures2
+            end
+        end || [First|Captures] <- ListMatch]),
+            erlang:display({classify, Buffer, BegPattern ++ "(.*)" ++ EndPattern, returned, R}),R;
+        nomatch ->
+            classify1(Buffer, Patterns, Repository)
+    end;
+classify1(Buffer, [#{"captures" := CapturesMap, "match" := Match}=P|Patterns], Repository) ->
+    %% What alternative do we have to \\b, punctuations will not match, but we do not want to catch things as atoms...
+    case re:run(Buffer, Match, [{capture, all, index}, global]) of
+        {match, ListMatch} ->
+            R = lists:flatten([begin
+                %erlang:display({match, Match, Captures}),
+                FirstCaptureClass = case maps:get("name", P, undefined) of
+                    undefined ->
+                        [];
+                    ClassName ->
+                        [{First, ClassName}]
+                end,
+                Keys = maps:keys(CapturesMap),
+                Keys1 = lists:reverse(lists:nthtail(length(Captures), lists:reverse(Keys))),
+                Captures1 = [{lists:nth(list_to_integer(Key), Captures), maps:get("name", maps:get(Key, CapturesMap))} || Key <- Keys1],
+                FirstCaptureClass ++ Captures1
+            end
+            || [First|Captures] <- ListMatch]),
+                erlang:display({classify, Buffer, Match, returned, R}),
+                R;
+        nomatch ->
+            classify1(Buffer, Patterns, Repository)
+    end;
+classify1(Buffer, [#{"match" := Match}=P|Patterns], Repository) ->
+    case re:run(Buffer, Match, [{capture, first, index}, global]) of
+        {match, ListMatch} ->
+            
+            R = lists:flatten([begin
+                case maps:get("name", P, undefined) of
+                    undefined ->
+                        [];
+                    ClassName ->
+                        [{First, ClassName}]
+                end
+            end || [First] <- ListMatch]),
+                erlang:display({classify, Buffer, Match, returned, R}),
+            R;
+        nomatch ->
+            classify1(Buffer, Patterns, Repository)
+    end.
 
 multi_line_prompt(Pbs) ->
     case application:get_env(stdlib, shell_multiline_prompt, default) of
