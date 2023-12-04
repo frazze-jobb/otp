@@ -25,8 +25,7 @@
 -export([init/0,init/1,start/1,start/2,edit_line/2]).
 -export([erase_line/0,erase_inp/1,redraw_line/1]).
 -export([length_before/1,length_after/1,prompt/1]).
--export([current_line/1, current_chars/1]).
-
+-export([current_line/1, current_chars/1, after_cursor/1]).
 -export([edit_line1/2]).
 -export([keymap/0]).
 -import(lists, [reverse/1, reverse/2]).
@@ -579,6 +578,12 @@ over_paren([GC|Cs], Paren, Match, D, N, R, L)  ->
 over_paren([], _, _, _, _, _, _) ->
     beep.
 
+%% TODO: Add support for <<, ", ', """ and make it more robust i.e. {" hej} ", svej<auto> does not work
+%% look into how edlin_context.erl does it.
+%% If we have odd_quotes of either ', " or """ then we can assume that the next closing paren is a quote
+%% If we do not have odd quotes, then we should go over the parenthesis and upon finding a quote, consume
+%% the whole quoted expression, and then continue with finding parenthesis
+
 over_paren_auto(Chars) ->
     over_paren_auto(Chars, 1, 1, 0, []).
 
@@ -678,6 +683,8 @@ length_after({line,_,{_,{_Bef,Aft},_},_}) ->
 prompt({line,Pbs,_,_}) ->
     Pbs.
 
+after_cursor({line,_,{_,{_Bef,Aft},LA},_}) ->
+    current_line({[],{[],Aft},LA}).
 current_chars({line,_,MultiLine,_}) ->
     current_line(MultiLine).
 current_line({line,_,MultiLine,_}) ->

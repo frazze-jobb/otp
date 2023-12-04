@@ -21,6 +21,7 @@
 %% description
 %%
 -export([get_context/1, get_context/2, odd_quotes/2]).
+-export([over_to_opening_quote/2]).
 %% The context record is a structure that helps with viewing a nested expression
 %% Typically we do not know the types of a tuple or a map in isolation, but if
 %% we make use of the type information available for a function or a record
@@ -75,7 +76,12 @@
 get_context(Line) ->
     {Bef0, Word} = edlin_expand:over_word(Line),
     case {{Bef0, Word}, odd_quotes($", Bef0)} of
-        {_, true} -> {string};
+        {{[$"|Bef1],_}, true} -> ParentContext = get_context(Bef1),
+            case ParentContext of
+                {{string, String}, {map, Map, Fields}} -> {{string, String++"\""}, {map, Map, Fields}};
+                _ ->  {string, ParentContext}
+            end;
+            %get_context(Bef0, Word);
         {{[$#|_], []}, _} -> {map_or_record};
         {{_Bef1, Word}, _} ->
             case is_binding(Word) of
@@ -89,7 +95,7 @@ get_context([$?|_], _) ->
 get_context(Bef0, Word) when is_list(Word) ->
     get_context(lists:reverse(Word) ++ Bef0, #context{});
 get_context([], #context{arguments = Args, parameter_count = Count, nestings = Nestings} = _CR) ->
-    case (Count+1 == length(Args)) andalso (Nestings =:= []) of
+    case Count+1 == length(Args) of
         true -> {term, lists:droplast(Args), lists:last(Args)};
         _ ->
             %% Nestings will not end up as an argument
@@ -99,9 +105,13 @@ get_context([], #context{arguments = Args, parameter_count = Count, nestings = N
                     0 when length(Args) > 0 -> {term, lists:droplast(Args), lists:last(Args)};
                     _ -> {term, Args, []}
                 end;
+                %% TODO: what todo with multiple nestings {case_clause,[{list,[],[]},{tuple,[],[]}]}
                 [{list, Args1, Arg}|_] -> {term, Args1, Arg};
                 [{tuple, Args1, Arg}|_] -> {term, Args1, Arg};
-                [{map, _Fields, _FieldToComplete, Args1, Arg}|_] -> {term, Args1, Arg}
+                [{map, Fields, [], _Args1, _Arg}|_] -> %erlang:display({m1, M}),
+                    {map, [], Fields} %;
+                %[{map, _Fields, _FieldToComplete, Args1, Arg}|_] -> %erlang:display({m2, M}),
+                %    {term, Args1, Arg}
             end
     end;
 get_context([$(|Bef], CR) ->
@@ -143,23 +153,41 @@ get_context([${|Bef], #context{ fields=Fields,
     case edlin_expand:over_word(Bef) of
         {[$#|Bef1], []} -> %% Map
             {Bef2, Map} = edlin_expand:over_word(Bef1),
-            case Map of
-                [] -> get_context(Bef2, #context{
+            case {Map, Unfinished} of
+                %% We are inside a map, but don't have the name of the map
+                %% hopefully we are inside a function call which will give us context
+                {[],_} -> get_context(Bef2,
+                                      #context{
                                            %% We finished a nesting lets reset and read the next nesting
                                            nestings = [{'map', Fields, FieldToComplete, Args, Unfinished}|Nestings]});
-                _ -> {map, Map, Fields}
+                %% We are inside a map, we know the binding of the map
+                %% and we know the completed fields
+                %% If we don't have an unfinished field, suggest the next field
+                %% We don't really know if we have an argument or not...
+                {_,[]} -> {map, Map, Fields};
+                %% If we have an unfinished field, it could be a valid key
+                {_, {_Type, String}} ->
+                    {{string, String}, {map, Map, Fields}}
+                %_ -> {term, Args, Unfinished} %% Should maybe return the value type of the map if such exist
             end;
         {_, []} ->
             get_context(Bef, #context{
                                 %% We finished a nesting lets reset and read the next nesting
                                 nestings = [{'tuple', Args, Unfinished}|Nestings]});
         {[$#|_Bef3], Record} -> %% Record
-            {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings};
+            case get_context(_Bef3) of
+                {function, Mod, _, _, _, _} ->
+                    {record, Mod, Record, Fields, FieldToComplete, Args, Unfinished, Nestings};
+                _ ->
+                    {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings}
+            end;
         {[], _} ->
+            %% TODO a{ produces {case_clause,{[],"a"} not really valid syntax, should we stop expanding, or just ignore?
             get_context(Bef, #context{
                 %% We finished a nesting lets reset and read the next nesting
                 nestings = [{'tuple', Args, Unfinished}|Nestings]});
         {_, _} ->
+            %% TODO a{ produces {case_clause,{[],"a"} not really valid syntax, should we stop expanding, or just ignore?
             get_context(Bef, #context{
                 %% We finished a nesting lets reset and read the next nesting
                 nestings = [{'tuple', Args, Unfinished}|Nestings]})
@@ -177,7 +205,12 @@ get_context([$,|Bef1], #context{parameter_count=Count}=CR) ->
                         parameter_count = Count+1});
 get_context([$>,$=|Bef1], #context{ parameter_count=Count,
                                     fields=Fields}=CR) ->
-    {Bef2, Field}=edlin_expand:over_word(Bef1),
+    {Bef2, Field0}=extract_argument2(Bef1),
+    Field = case Field0 of
+        {_, Field1} -> Field1;
+        _ -> Field0
+    end,
+    %erlang:display({field, Field, Bef2}),
     case Count of
         0 -> %% If count is 0, then we know its a value we may want to complete.
             get_context(Bef2, CR#context{fields = [Field|Fields],
@@ -186,7 +219,7 @@ get_context([$>,$=|Bef1], #context{ parameter_count=Count,
     end;
 get_context([$=,$:|Bef1], #context{ parameter_count=Count,
                                     fields=Fields}=CR) ->
-    {Bef2, Field}=edlin_expand:over_word(Bef1),
+    {Bef2, Field}=extract_argument2(Bef1),
     case Count of
         0 -> %% If count is 0, then we know its a value we may want to complete.
             get_context(Bef2, CR#context{fields = [Field|Fields],
@@ -213,7 +246,13 @@ get_context([$.|Bef2], CR) ->
                          end,
     case edlin_expand:over_word(Bef2) of
         {[$#|_Bef3], Record} -> %% Record
-            {record, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings};
+            case get_context(_Bef3) of
+                {function, Mod, _, _, _, _} ->
+                    {record, Mod, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings};
+                _ ->
+                    {record, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings}
+            end;
+            
         _ -> {'end'}
     end;
 get_context([$:|Bef2], _) ->
@@ -247,9 +286,15 @@ get_context(Bef0, #context{arguments=Args, parameter_count=Count} = CR) ->
     case over_to_opening(Bef0) of
         {_,[]} -> {term};
         {error, _}=E -> E;
-        {record} -> {record};
-        {fun_} -> {fun_};
-        {new_fun, _}=F -> F;
+        {Bef1, record} -> 
+            case get_context(Bef1) of
+                {function, Mod, _, _, _, _} ->
+                    {record, Mod};
+                _ ->
+                    {record}
+            end;
+        {_, fun_} -> {fun_};
+        {_, {new_fun, _}}=F -> F;
         {Bef1, {fun_, Str}=Arg} ->
             case Count of
                 0 ->
@@ -264,7 +309,7 @@ read_operator(Bef) ->
     read_operator1(Bef).
 
 operator_string() -> "-=><:+*/|&^~".
-read_operator1([$\ |Bef]) -> read_operator1(Bef);
+read_operator1([$\s|Bef]) -> read_operator1(Bef);
 read_operator1("mer " ++ Bef) -> {Bef, "rem"};
 read_operator1("osladna " ++ Bef) -> {Bef, "andalso"};
 read_operator1("dna " ++ Bef) -> {Bef, "and"};
@@ -347,17 +392,22 @@ over_to_opening1(Bef, Acc = #{args := Args}) ->
                 {Bef2, []} -> over_to_opening_return(Bef2, Args);
                 {Bef2, Arg} -> over_to_opening1(Bef2, Acc#{args => [Arg | Args]})
             end
-        end.
+    end.
 over_to_opening_return(Bef, Args) ->
     case Args of
         [] -> {Bef, []};
         [Arg] -> {Bef, Arg};
         [{operator, "-"}, {integer, I}] -> {Bef, {integer, "-" ++ I}};
         [{operator, "-"}, {float, F}] -> {Bef, {float, "-" ++ F}};
-        [{atom, "fun"}, {atom, _}] -> throw({fun_});
+        [{atom, "fun"}, {atom, _}] -> throw({Bef, fun_});
         _ ->
             case look_for_non_operator_separator(Args) of
-                true -> {Bef, {operation, lists:flatten(lists:join(" ", lists:map(fun({_, Arg}) -> Arg end, Args)))}};
+                true ->
+                    Operation = case lists:flatten(lists:join(" ", lists:map(fun({_, Arg}) -> Arg end, Args))) of
+                        [$<,$<,$\s|Rest] -> "<<"++Rest;
+                        R -> R
+                    end,
+                    {Bef, {operation, Operation}};
                 false -> {error, length(Bef)}
             end
     end.
@@ -439,21 +489,22 @@ over_parenthesis_or_call(Bef2) ->
                                 {Bef42, Mod++[$:|Fun]};
                             _ -> {Bef4, Fun}
                         end,
-        case ModFun of
-            [] -> {Bef5, {parenthesis, Clause}};
-            "fun" -> throw({new_fun, Clause});
-            _ -> {Bef5, {call, ModFun++Clause}}
-        end
+                        case ModFun of
+                            [] -> {Bef5, {parenthesis, Clause}};
+                            "fun" -> throw({Bef5, {new_fun, Clause}});
+                            _ -> {Bef5, {call, ModFun++Clause}}
+                        end
     end.
 over_keyword_or_fun(Bef1) ->
     case over_keyword_expression(Bef1) of
         {Bef2, KeywordExpression} -> {Bef2, {keyword, KeywordExpression ++ " end"}};
         _ -> throw({error, length(Bef1)})
     end.
-extract_argument2([$>|Bef0]=Bef)->
+extract_argument2([$\s|Bef0])->extract_argument2(Bef0);
+extract_argument2([$>|_]=Bef)->
     case read_operator(Bef) of
         {[$>|_]=Bef1, ">"=Operator} ->
-            try over_pid_port_or_ref(Bef0)
+            try over_pid_port_or_ref(Bef1)
             catch
                 %% not a pid, port, ref or binary
                 throw:{error, _}=E -> throw(E);
@@ -475,7 +526,10 @@ extract_argument2(Bef0) ->
         {[$)|Bef1], []} -> over_parenthesis_or_call(Bef1);
         {[$]|Bef1], []} -> over_list(Bef1);
         {[$"|Bef2], []} -> {Bef3, _Quote} = over_to_opening_quote($", Bef2),
-            {Bef3, {string, _Quote}};
+            case Bef3 of
+                [$"|Bef2] -> {Bef2, {string, _Quote}};
+                _ -> {Bef3, {string, _Quote}}
+            end;
         {"dne "++Bef1, []} -> over_keyword_or_fun(Bef1);
         {[$=,$:|_], []} -> {stop};
         {[$:|_], []} -> {stop};
@@ -509,7 +563,7 @@ extract_argument(Bef0) ->
                     case is_binding(Var) of
                         true -> {Bef2,{var, Var}};
                         false -> case Bef2 of
-                            [$#|_] -> throw({record});
+                            [$#|Bef3] -> throw({Bef3, record});
                             _ -> {Bef2, {atom, Var}}
                         end
                     end
@@ -575,6 +629,10 @@ over_to_opening_quote([Stack], [C|Bef], Word) ->
     over_to_opening_quote([Stack], Bef, [C| Word]);
 over_to_opening_quote(_,_,Word) -> {lists:reverse(Word), []}.
 
+matching_paren("\"\"\"","\"\"\"") -> true;
+matching_paren("\"","\"") -> true;
+matching_paren("'","'") -> true;
+matching_paren("<<",">>") -> true;
 matching_paren($(,$)) -> true;
 matching_paren($[,$]) -> true;
 matching_paren(${,$}) -> true;
@@ -601,7 +659,7 @@ over_to_opening_paren([CC|Stack], [CC|Bef], Word) -> %% Nested parenthesis of sa
 over_to_opening_paren(Stack, [Q,NEC|Bef], Word) when Q == $"; Q == $', NEC /= $$, NEC /= $\\ ->
     %% Consume the whole quoted text, it may contain parenthesis which
     %% would have confused us.
-    {Bef1, QuotedWord} = over_to_opening_quote(Q, Bef),
+    {Bef1, QuotedWord} = over_to_opening_quote(Q, [NEC|Bef]),
     over_to_opening_paren(Stack, Bef1, QuotedWord ++ Word);
 over_to_opening_paren(CC, [C|Bef], Word) -> over_to_opening_paren(CC, Bef, [C|Word]).
 

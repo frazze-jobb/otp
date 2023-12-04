@@ -711,7 +711,7 @@ get_line1({Expand, Before, Cs0, Cont,Rs}, Drv, Shell, Ls0, Encoding)
   when Expand =:= expand; Expand =:= expand_full ->
     send_drv_reqs(Drv, Rs),
     ExpandFun = get(expand_fun),
-    {Found, CompleteChars, Matches} = ExpandFun(Before, []),
+    {Found, CompleteChars, Matches} = ExpandFun(Before, [{'after', edlin:after_cursor(Cont)}]),
     case Found of
         no -> send_drv(Drv, beep);
         _ -> ok
