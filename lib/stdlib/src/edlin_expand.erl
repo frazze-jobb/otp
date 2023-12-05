@@ -96,10 +96,18 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
     Aft = proplists:get_value('after', Opts, []),
     {_Bef1, Word} = over_word(Bef0),
     {Res, Expansion, Matches} = case edlin_context:get_context(Bef0) of
-                 {string, {map, Binding, Keys}} ->
+                 {string, {map, _Binding, Keys}} ->
                     {_Bef_1, FieldWord0} = edlin_context:over_to_opening_quote($",Bef0),
                     FieldWord = lists:reverse(lists:nthtail(1,lists:reverse(FieldWord0))),
-                    fold_results([expand_map(FieldWord, Bs, Binding, Keys), expand_string(Bef0)]);
+                    %erlang:display({FieldWord, hej}),
+                    {[$}|Aft1], _} = over_word(Aft),
+                    {[$=|Aft2], _} = over_word(Aft1),
+                    {_, _Var} = over_word(Aft2),
+                    Var = lists:reverse(_Var),
+                    case expand_map(FieldWord, Bs, Var, Keys, ":=?") of
+                        {no, [], []} -> expand_string(Bef0);
+                        M -> M
+                    end;
                  {string, _Context} -> %erlang:display({Wow,2}),
                     expand_string(Bef0);
                 %% TODO: Handle binaries as well
@@ -150,6 +158,7 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
 
                  {map, [], Keys} ->
                     %% Check for pattern match map
+                    erlang:display({hej, Aft}),
                     {[$}|Aft1], _} = over_word(Aft),
                     {[$=|Aft2], _} = over_word(Aft1),
                     {_, _Var} = over_word(Aft2),
@@ -245,6 +254,8 @@ expand_map(Word, Bs, Binding, Keys) ->
     expand_map(Word, Bs, Binding, Keys, "=>").
 expand_map(_, [], _, _,_) ->
     {no, [], []};
+expand_map(_, _, [], _,_) ->
+    {no, [], []};
 expand_map(Word, Bs, Binding, Keys, Operator) ->
     To_string = fun
         (Alt) when is_list(Alt) -> "\""++Alt++"\"";
@@ -253,12 +264,17 @@ expand_map(Word, Bs, Binding, Keys, Operator) ->
         (Alt) when is_float(Alt) -> float_to_list(Alt);
         (Alt) -> Alt
     end,
+    %erlang:display({Binding, Bs, Word}),
     case proplists:get_value(list_to_atom(Binding), Bs) of
         Map when is_map(Map) ->
             K1 = sets:from_list([To_string(K)||K<-maps:keys(Map)]),
             K2 = sets:subtract(K1, sets:from_list(Keys)),
+            %erlang:display({Binding, Bs}),
+            %erlang:display({sets:to_list(K1), sets:to_list(K2), match(Word, sets:to_list(K2), Operator)}),
             match(Word, sets:to_list(K2), Operator);
-        _ -> {no, [], []}
+        _ ->
+%erlang:display({what, H}),
+            {no, [], []}
     end.
 
 over_word(Bef) ->
@@ -1037,6 +1053,11 @@ strip_quotes(Atom) ->
 
 match_preprocess_alt({_,_}=Alt) -> Alt;
 match_preprocess_alt(X) -> {X, ""}.
+
+toTitleCase("\"" ++ Str) ->
+    Str1 = lists:droplast(Str),
+    toTitleCase(Str1);
+
 toTitleCase(SnakeStr) ->
     %% Split the string into a list of "words" divided by the underscore
     Words = string:split(SnakeStr, "_", all),

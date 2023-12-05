@@ -20,7 +20,7 @@
 -module(edlin_context).
 %% description
 %%
--export([get_context/1, get_context/2, odd_quotes/2]).
+-export([get_context/1, get_context/2, get_context/3, odd_quotes/2]).
 -export([over_to_opening_quote/2]).
 %% The context record is a structure that helps with viewing a nested expression
 %% Typically we do not know the types of a tuple or a map in isolation, but if
@@ -45,7 +45,7 @@
 %% If the word is empty, then we do not want to complete with anything if we just closed
 %% a bracket, ended a quote (user has to enter , or . themselves)
 %% but maybe we can help to add ',',},] depending on context in the future
--spec get_context(Line) -> Context when
+-spec get_context(Line) -> [Context] when
       Line :: string(), %% The whole line in reverse excluding Word
       Mod :: string(),
       Fun :: string(),
@@ -74,28 +74,49 @@
                | {record, Record, Fields, FieldToComplete, Args, Unfinished, Nesting}
                | {error, integer()}.
 get_context(Line) ->
-    {Bef0, Word} = edlin_expand:over_word(Line),
-    case {{Bef0, Word}, odd_quotes($", Bef0)} of
-        {{[$"|Bef1],_}, true} -> ParentContext = get_context(Bef1),
-            case ParentContext of
-                {{string, String}, {map, Map, Fields}} -> {{string, String++"\""}, {map, Map, Fields}};
-                _ ->  {string, ParentContext}
-            end;
-            %get_context(Bef0, Word);
-        {{[$#|_], []}, _} -> {map_or_record};
-        {{_Bef1, Word}, _} ->
-            case is_binding(Word) of
-                true -> {binding};
-                false -> get_context(Bef0, Word)
-            end
+    case odd_quotes($", Line) of
+        true -> 
+            {Bef0, Quote} = over_to_opening_quote($", Line),
+            get_context(Bef0, #context{}, [{string, lists:droplast(Quote)}]);
+        false -> get_context(Line, #context{}, [])
     end.
-get_context(">-" ++ _, L) when is_list(L) -> {term};
-get_context([$?|_], _) ->
-    {macro};
-get_context(Bef0, Word) when is_list(Word) ->
-    get_context(lists:reverse(Word) ++ Bef0, #context{});
-get_context([], #context{arguments = Args, parameter_count = Count, nestings = Nestings} = _CR) ->
-    case Count+1 == length(Args) of
+
+% get_context(Line) ->
+
+%     {Bef0, Word} = edlin_expand:over_word(Line),
+%     case {{Bef0, Word}, odd_quotes($", Bef0)} of
+%         %% TODO, this only works for single word strings
+%         %% What we should do is this, if odd_quotes is true, then we should
+%         %% read up until the next quote, when we got the context, we should
+%         %% continue reading the context until until we reach the beginning of the string
+%         %% the context should be reversed before we return it.
+%         %% Now we should always be able to tell what the parent context is and this should
+%         %% help us make better predictions.
+
+%         {{[$"|Bef1],_}, true} -> ParentContext = get_context(Bef1),
+%         %erlang:display({parent, ParentContext}),
+%             case ParentContext of
+%                 {{string, String}, {map, Map, Fields}} -> 
+%                     %erlang:display({string, String}),
+%                     %erlang:display({map, Map, Fields}),
+%                     {{string, String++"\""}, {map, Map, Fields}};
+%                 _ ->  {string, ParentContext}
+%             end;
+%             %get_context(Bef0, Word);
+%         {{[$#|_], []}, _} -> {map_or_record};
+%         {{_Bef1, Word}, _} ->
+%             case is_binding(Word) of
+%                 true -> {binding};
+%                 false -> get_context(Bef0, Word)
+%             end
+%     end.
+% get_context(">-" ++ _, L) when is_list(L) -> {term};
+% get_context([$?|_], _) ->
+%     {macro};
+% get_context(Bef0, Word) when is_list(Word) ->
+%     get_context(lists:reverse(Word) ++ Bef0, #context{});
+get_context([], #context{arguments = Args, parameter_count = Count, nestings = Nestings} = _CR, Acc) ->
+    LastContext = case Count+1 == length(Args) of
         true -> {term, lists:droplast(Args), lists:last(Args)};
         _ ->
             %% Nestings will not end up as an argument
@@ -113,8 +134,11 @@ get_context([], #context{arguments = Args, parameter_count = Count, nestings = N
                 %[{map, _Fields, _FieldToComplete, Args1, Arg}|_] -> %erlang:display({m2, M}),
                 %    {term, Args1, Arg}
             end
-    end;
-get_context([$(|Bef], CR) ->
+    end,
+    lists:reverse([LastContext|Acc]);
+%% TODO should we ouput unfinished and such directly in the context stack, instead of accumulatiing
+%% a nesting inside the context object?
+get_context([$(|Bef], CR, Acc) ->
     %% We have an unclosed opening parenthesis
     %% Check if we have a function call
     %% We can deduce the minimum arity based on how many terms we trimmed
@@ -122,22 +146,23 @@ get_context([$(|Bef], CR) ->
     %% shell_default and erlang are imported, make sure we can do expansion for those
     {Bef1, Fun} = edlin_expand:over_word(Bef),
     case Fun of
-        [] -> {term}; % parenthesis
+        [] -> get_context(Bef, #context{}, [{term}|Acc]); % parenthesis
         _ ->
-            {_, Mod} = over_module(Bef1, Fun),
+            {Bef2, Mod} = over_module(Bef1, Fun),
             case Mod of
-                "shell" -> {term};
-                "shell_default" -> {term};
+                "shell" -> get_context(Bef2, #context{}, [{term}|Acc]);
+                "shell_default" -> get_context(Bef2, #context{}, [{term}|Acc]);
                 _ ->
                     case CR#context.parameter_count+1 == length(CR#context.arguments) of
                         true ->
                             %% N arguments N-1 commas, this means that we have an argument
                             %% still being worked on.
-                            {function, Mod, Fun, lists:droplast(CR#context.arguments),
-                             lists:last(CR#context.arguments),CR#context.nestings};
+                            get_context(Bef2, #context{}, 
+                                [{function, Mod, Fun, lists:droplast(CR#context.arguments),
+                             lists:last(CR#context.arguments),CR#context.nestings}|Acc]);
                         _ ->
-                            {function, Mod, Fun, CR#context.arguments,
-                             [], CR#context.nestings}
+                            get_context(Bef2, #context{}, [{function, Mod, Fun, CR#context.arguments,
+                             [], CR#context.nestings}|Acc])
                     end
             end
     end;
@@ -145,7 +170,7 @@ get_context([${|Bef], #context{ fields=Fields,
                                 current_field=FieldToComplete,
                                 arguments = Arguments,
                                 parameter_count = Count,
-                                nestings=Nestings}) ->
+                                nestings=Nestings}, Acc) ->
     {Args, Unfinished} = case Count+1 == length(Arguments) of
                              true -> {lists:droplast(Arguments), lists:last(Arguments)};
                              _ -> {Arguments, []}
@@ -159,52 +184,48 @@ get_context([${|Bef], #context{ fields=Fields,
                 {[],_} -> get_context(Bef2,
                                       #context{
                                            %% We finished a nesting lets reset and read the next nesting
-                                           nestings = [{'map', Fields, FieldToComplete, Args, Unfinished}|Nestings]});
+                                           nestings = [{'map', Fields, FieldToComplete, Args, Unfinished}|Nestings]}, Acc);
                 %% We are inside a map, we know the binding of the map
                 %% and we know the completed fields
                 %% If we don't have an unfinished field, suggest the next field
                 %% We don't really know if we have an argument or not...
-                {_,[]} -> {map, Map, Fields};
+                {_,[]} -> get_context(Bef2, #context{}, [{map, Map, Fields}|Acc]);
                 %% If we have an unfinished field, it could be a valid key
                 {_, {_Type, String}} ->
-                    {{string, String}, {map, Map, Fields}}
+                    get_context(Bef2, #context{}, [{string, String}, {map, Map, Fields}|Acc])
                 %_ -> {term, Args, Unfinished} %% Should maybe return the value type of the map if such exist
             end;
         {_, []} ->
             get_context(Bef, #context{
                                 %% We finished a nesting lets reset and read the next nesting
-                                nestings = [{'tuple', Args, Unfinished}|Nestings]});
-        {[$#|_Bef3], Record} -> %% Record
-            case get_context(_Bef3) of
-                {function, Mod, _, _, _, _} ->
-                    {record, Mod, Record, Fields, FieldToComplete, Args, Unfinished, Nestings};
-                _ ->
-                    {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings}
-            end;
+                                nestings = [{'tuple', Args, Unfinished}|Nestings]}, Acc);
+        {[$#|Bef3], Record} -> %% Record
+            get_context(Bef3, #context{}, [{record, Record, Fields, FieldToComplete, Args,
+                Unfinished, Nestings}|Acc]);
         {[], _} ->
             %% TODO a{ produces {case_clause,{[],"a"} not really valid syntax, should we stop expanding, or just ignore?
             get_context(Bef, #context{
                 %% We finished a nesting lets reset and read the next nesting
-                nestings = [{'tuple', Args, Unfinished}|Nestings]});
+                nestings = [{'tuple', Args, Unfinished}|Nestings]}, Acc);
         {_, _} ->
             %% TODO a{ produces {case_clause,{[],"a"} not really valid syntax, should we stop expanding, or just ignore?
             get_context(Bef, #context{
                 %% We finished a nesting lets reset and read the next nesting
-                nestings = [{'tuple', Args, Unfinished}|Nestings]})
+                nestings = [{'tuple', Args, Unfinished}|Nestings]}, Acc)
     end;
-get_context([$[|Bef1], #context{arguments = Arguments, parameter_count = Count, nestings=Nestings}) ->
+get_context([$[|Bef1], #context{arguments = Arguments, parameter_count = Count, nestings=Nestings}, Acc) ->
     {Args, Unfinished} = case Count+1 == length(Arguments) of
                              true -> {lists:droplast(Arguments), lists:last(Arguments)};
                              _ -> {Arguments, []}
                          end,
     get_context(Bef1, #context{
                          %% We finished a nesting lets reset and read the next nesting
-                         nestings = [{'list', Args, Unfinished}|Nestings]});
-get_context([$,|Bef1], #context{parameter_count=Count}=CR) ->
+                         nestings = [{'list', Args, Unfinished}|Nestings]}, Acc);
+get_context([$,|Bef1], #context{parameter_count=Count}=CR, Acc) ->
     get_context(Bef1, CR#context{
-                        parameter_count = Count+1});
+                        parameter_count = Count+1}, Acc);
 get_context([$>,$=|Bef1], #context{ parameter_count=Count,
-                                    fields=Fields}=CR) ->
+                                    fields=Fields}=CR, Acc) ->
     {Bef2, Field0}=extract_argument2(Bef1),
     Field = case Field0 of
         {_, Field1} -> Field1;
@@ -214,30 +235,30 @@ get_context([$>,$=|Bef1], #context{ parameter_count=Count,
     case Count of
         0 -> %% If count is 0, then we know its a value we may want to complete.
             get_context(Bef2, CR#context{fields = [Field|Fields],
-                                         current_field = Field});
-        _ -> get_context(Bef2, CR#context{fields = [Field|Fields]})
+                                         current_field = Field}, Acc);
+        _ -> get_context(Bef2, CR#context{fields = [Field|Fields]}, Acc)
     end;
 get_context([$=,$:|Bef1], #context{ parameter_count=Count,
-                                    fields=Fields}=CR) ->
+                                    fields=Fields}=CR, Acc) ->
     {Bef2, Field}=extract_argument2(Bef1),
     case Count of
         0 -> %% If count is 0, then we know its a value we may want to complete.
             get_context(Bef2, CR#context{fields = [Field|Fields],
-                                         current_field = Field});
-        _ -> get_context(Bef2, CR#context{fields = [Field|Fields]})
+                                         current_field = Field}, Acc);
+        _ -> get_context(Bef2, CR#context{fields = [Field|Fields]}, Acc)
     end;
 get_context([$=|Bef1], #context{
                           parameter_count=Count,
-                          fields=Fields}=CR) ->
+                          fields=Fields}=CR, Acc) ->
     {Bef2, Field}=edlin_expand:over_word(Bef1),
     % if we are here, its always going to be 
     case Count of
         0 -> %%[$=|_],
             get_context(Bef2, CR#context{fields = [Field|Fields],
-                                         current_field = Field});
-        _ -> get_context(Bef2, CR#context{fields = [Field|Fields]})
+                                         current_field = Field}, Acc);
+        _ -> get_context(Bef2, CR#context{fields = [Field|Fields]}, Acc)
     end;
-get_context([$.|Bef2], CR) ->
+get_context([$.|Bef2], CR, Acc) ->
     Arguments = CR#context.arguments,
     Count = CR#context.parameter_count,
     {Args, Unfinished} = case Count+1 == length(Arguments) of
@@ -245,64 +266,63 @@ get_context([$.|Bef2], CR) ->
                              _ -> {Arguments, []}
                          end,
     case edlin_expand:over_word(Bef2) of
-        {[$#|_Bef3], Record} -> %% Record
-            case get_context(_Bef3) of
-                {function, Mod, _, _, _, _} ->
-                    {record, Mod, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings};
-                _ ->
-                    {record, Record, CR#context.fields, CR#context.current_field, Args, Unfinished, CR#context.nestings}
-            end;
-            
-        _ -> {'end'}
+        {[$#|Bef3], Record} -> %% Record
+            get_context(Bef3, #context{},
+                [{record, Record, CR#context.fields, CR#context.current_field,
+                    Args, Unfinished, CR#context.nestings}|Acc]);
+        _ -> get_context(Bef2, #context{}, [{'end'}|Acc])
     end;
-get_context([$:|Bef2], _) ->
+get_context([$:|Bef2], _, Acc) ->
     %% look backwards to see if its a fun
     {Bef3, Mod} = edlin_expand:over_word(Bef2),
     case edlin_expand:over_word(Bef3) of
-        {_, "fun"} -> {fun_, Mod};
-        _ when Mod =:= [] -> {function};
-        _ -> {function, Mod}
-    end;
-get_context([$/|Bef1], _) ->
+        {Bef4, "fun"} -> get_context(Bef4, #context{}, [{fun_, Mod}|Acc]);
+        _ when Mod =:= [] -> get_context(Bef3, #context{}, [{function}|Acc]);
+        _ -> get_context(Bef3, #context{}, [{function, Mod}|Acc])
+    end,
+    get_context();
+get_context([$/|Bef1], _, Acc) ->
     {Bef2, Fun} = edlin_expand:over_word(Bef1),
-    {_, Mod} = over_module(Bef2, Fun),
-    {fun_, Mod, Fun};
-get_context([$>,$-|_Bef2], #context{arguments = Args} = CR) ->
-    %% Inside a function
+    {Bef3, Mod} = over_module(Bef2, Fun),
+    get_context(Bef3, #context{}, [{fun_, Mod, Fun}|Acc]);
+get_context([$>,$-|Bef], #context{arguments = Args} = CR, Acc) ->
+    %% Inside a function or case/catch/receive expression
+    %% TODO, we should read that context, and continue reading upwards
+    %% in the context stack
     case CR#context.parameter_count+1 == length(Args) of
         true ->
-            {term, lists:droplast(Args), lists:last(Args)};
-        _ -> {term, Args, []}
+            get_context(Bef, #context{}, [{term, lists:droplast(Args), lists:last(Args)}|Acc]);
+        _ -> get_context(Bef, #context{}, [{term, Args, []}|Acc])
     end;
-get_context("nehw " ++ _Bef2, #context{arguments = Args} = CR) ->
+get_context("nehw " ++ Bef, #context{arguments = Args} = CR, Acc) ->
     %% Inside a guard
     case CR#context.parameter_count+1 == length(Args) of
         true ->
-            {term, lists:droplast(Args), lists:last(Args)};
-        _ -> {term, Args, []}
+            get_context(Bef, #context{}, [{term, lists:droplast(Args), lists:last(Args)}|Acc]);
+        _ -> get_context(Bef, #context{}, [{term, Args, []}|Acc])
     end;
-get_context([$\ |Bef],CR) -> get_context(Bef, CR); %% matching space here simplifies the other clauses
-get_context(Bef0, #context{arguments=Args, parameter_count=Count} = CR) ->
+get_context([$\ |Bef],CR, Acc) -> get_context(Bef, CR, Acc); %% matching space here simplifies the other clauses
+get_context(Bef0, #context{arguments=Args, parameter_count=Count} = CR, Acc) ->
     case over_to_opening(Bef0) of
-        {_,[]} -> {term};
+        {Bef1,[]} -> get_context(Bef1, #context{}, [{term}|Acc]);
         {error, _}=E -> E;
         {Bef1, record} -> 
             case get_context(Bef1) of
                 {function, Mod, _, _, _, _} ->
-                    {record, Mod};
+                    get_context(Bef1, #context{}, [{record, Mod}|Acc]);
                 _ ->
-                    {record}
+                    get_context(Bef1, #context{}, [{record}|Acc])
             end;
-        {_, fun_} -> {fun_};
-        {_, {new_fun, _}}=F -> F;
+        {Bef1, fun_} -> get_context(Bef1, #context{}, [{fun_}|Acc];
+        {Bef1, {new_fun, _}}=F -> get_context(Bef1, #context{}, [F|Acc];
         {Bef1, {fun_, Str}=Arg} ->
             case Count of
                 0 ->
                     [_, Mod, Fun| _] = string:tokens(Str, " :/"),
-                    {fun_, Mod, Fun};
-                _ -> get_context(Bef1, CR#context{arguments=[Arg|Args]})
+                    get_context(Bef1, #context{}, [{fun_, Mod, Fun}|Acc];
+                _ -> get_context(Bef1, CR#context{arguments=[Arg|Args]}, Acc)
             end;
-        {Bef1, Arg} -> get_context(Bef1, CR#context{arguments=[Arg|Args]})
+        {Bef1, Arg} -> get_context(Bef1, CR#context{arguments=[Arg|Args]}, Acc)
     end.
 
 read_operator(Bef) ->
