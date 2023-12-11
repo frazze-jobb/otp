@@ -20,7 +20,7 @@
 -module(edlin_context).
 %% description
 %%
--export([get_context/1, get_context/2, get_context/3, odd_quotes/2]).
+-export([get_context/1, get_context/3, odd_quotes/2]).
 -export([over_to_opening_quote/2]).
 %% The context record is a structure that helps with viewing a nested expression
 %% Typically we do not know the types of a tuple or a map in isolation, but if
@@ -45,6 +45,13 @@
 %% If the word is empty, then we do not want to complete with anything if we just closed
 %% a bracket, ended a quote (user has to enter , or . themselves)
 %% but maybe we can help to add ',',},] depending on context in the future
+% -spec get_context2(Line) -> [Context] wxHelpEvent
+%     Context :: {string, String} %% unclosed string
+%              | {expression, Expression} %% an expression containing operators thats not finished?
+%              | {term, FinishedTerms, Term} %% potentially finished ',' separated terms
+%              | {function, Mod, Fun, FinishedArgs, UnfinishedArg, NestingsOfUnfinishedArg}
+%              | {record, Name, Fields, FieldToComplete, FinishedArgs, UnfinishedArg, NestingsOfUnfinishedArg}
+ 
 -spec get_context(Line) -> [Context] when
       Line :: string(), %% The whole line in reverse excluding Word
       Mod :: string(),
@@ -117,25 +124,25 @@ get_context(Line) ->
 %     get_context(lists:reverse(Word) ++ Bef0, #context{});
 get_context([], #context{arguments = Args, parameter_count = Count, nestings = Nestings} = _CR, Acc) ->
     LastContext = case Count+1 == length(Args) of
-        true -> {term, lists:droplast(Args), lists:last(Args)};
+        true -> [{term, lists:droplast(Args), lists:last(Args)}];
         _ ->
             %% Nestings will not end up as an argument
             Nestings1 = lists:reverse(Nestings),
             case Nestings1 of
                 [] -> case Count of
-                    0 when length(Args) > 0 -> {term, lists:droplast(Args), lists:last(Args)};
-                    _ -> {term, Args, []}
+                    0 when length(Args) > 0 -> [{term, lists:droplast(Args), lists:last(Args)}];
+                    _ -> []
                 end;
                 %% TODO: what todo with multiple nestings {case_clause,[{list,[],[]},{tuple,[],[]}]}
-                [{list, Args1, Arg}|_] -> {term, Args1, Arg};
-                [{tuple, Args1, Arg}|_] -> {term, Args1, Arg};
+                [{list, Args1, Arg}|_] -> [{term, Args1, Arg}];
+                [{tuple, Args1, Arg}|_] -> [{term, Args1, Arg}];
                 [{map, Fields, [], _Args1, _Arg}|_] -> %erlang:display({m1, M}),
-                    {map, [], Fields} %;
+                    [{map, [], Fields}] %;
                 %[{map, _Fields, _FieldToComplete, Args1, Arg}|_] -> %erlang:display({m2, M}),
                 %    {term, Args1, Arg}
             end
     end,
-    lists:reverse([LastContext|Acc]);
+    lists:reverse(LastContext ++ Acc);
 %% TODO should we ouput unfinished and such directly in the context stack, instead of accumulatiing
 %% a nesting inside the context object?
 get_context([$(|Bef], CR, Acc) ->
@@ -192,6 +199,7 @@ get_context([${|Bef], #context{ fields=Fields,
                 {_,[]} -> get_context(Bef2, #context{}, [{map, Map, Fields}|Acc]);
                 %% If we have an unfinished field, it could be a valid key
                 {_, {_Type, String}} ->
+                    edlin:display(_Type),
                     get_context(Bef2, #context{}, [{string, String}, {map, Map, Fields}|Acc])
                 %_ -> {term, Args, Unfinished} %% Should maybe return the value type of the map if such exist
             end;
@@ -279,8 +287,7 @@ get_context([$:|Bef2], _, Acc) ->
         {Bef4, "fun"} -> get_context(Bef4, #context{}, [{fun_, Mod}|Acc]);
         _ when Mod =:= [] -> get_context(Bef3, #context{}, [{function}|Acc]);
         _ -> get_context(Bef3, #context{}, [{function, Mod}|Acc])
-    end,
-    get_context();
+    end;
 get_context([$/|Bef1], _, Acc) ->
     {Bef2, Fun} = edlin_expand:over_word(Bef1),
     {Bef3, Mod} = over_module(Bef2, Fun),
@@ -293,6 +300,16 @@ get_context([$>,$-|Bef], #context{arguments = Args} = CR, Acc) ->
         true ->
             get_context(Bef, #context{}, [{term, lists:droplast(Args), lists:last(Args)}|Acc]);
         _ -> get_context(Bef, #context{}, [{term, Args, []}|Acc])
+    end;
+get_context([$;|Bef1], #context{arguments = Args}=CR, Acc) ->
+    %% Separator of a guard clause, or some other clause
+    %% in this case we want to suggest a pattern match for the next clause
+    %% so we have to read up until the clause opener, (when, call_fun\(\), catch, after, receive, else, case_of)
+    {Bef2, ClauseOpenerKeyWord, Clauses} = over_to_clause_opener(Bef1),
+    case CR#context.parameter_count+1 == length(Args) of
+        true ->
+            get_context(Bef2, #context{}, [{ClauseOpenerKeyWord, Clauses},{term, lists:droplast(Args), lists:last(Args)}|Acc]);
+        _ -> get_context(Bef2, #context{}, [{ClauseOpenerKeyWord, Clauses},{term, Args, []} |Acc])
     end;
 get_context("nehw " ++ Bef, #context{arguments = Args} = CR, Acc) ->
     %% Inside a guard
@@ -313,13 +330,13 @@ get_context(Bef0, #context{arguments=Args, parameter_count=Count} = CR, Acc) ->
                 _ ->
                     get_context(Bef1, #context{}, [{record}|Acc])
             end;
-        {Bef1, fun_} -> get_context(Bef1, #context{}, [{fun_}|Acc];
-        {Bef1, {new_fun, _}}=F -> get_context(Bef1, #context{}, [F|Acc];
+        {Bef1, fun_} -> get_context(Bef1, #context{}, [{fun_}|Acc]);
+        {Bef1, {new_fun, _}}=F -> get_context(Bef1, #context{}, [F|Acc]);
         {Bef1, {fun_, Str}=Arg} ->
             case Count of
                 0 ->
                     [_, Mod, Fun| _] = string:tokens(Str, " :/"),
-                    get_context(Bef1, #context{}, [{fun_, Mod, Fun}|Acc];
+                    get_context(Bef1, #context{}, [{fun_, Mod, Fun}|Acc]);
                 _ -> get_context(Bef1, CR#context{arguments=[Arg|Args]}, Acc)
             end;
         {Bef1, Arg} -> get_context(Bef1, CR#context{arguments=[Arg|Args]}, Acc)
@@ -502,18 +519,24 @@ over_parenthesis_or_call(Bef2) ->
             {_, []} -> %% no matching (
                 throw({error, length(Bef2)});
             {Bef3, Clause} ->
-        {Bef4, Fun} = edlin_expand:over_word(Bef3),
-        {Bef5, ModFun} = case Bef4 of
-                            [$:|Bef41] ->
-                                {Bef42, Mod} = edlin_expand:over_word(Bef41),
-                                {Bef42, Mod++[$:|Fun]};
-                            _ -> {Bef4, Fun}
-                        end,
-                        case ModFun of
-                            [] -> {Bef5, {parenthesis, Clause}};
-                            "fun" -> throw({Bef5, {new_fun, Clause}});
-                            _ -> {Bef5, {call, ModFun++Clause}}
-                        end
+                {Bef4, Fun} = edlin_expand:over_word(Bef3),
+                {Bef5, ModFun} = case Bef4 of
+                                    [$:|Bef41] ->
+                                        {Bef42, Mod} = edlin_expand:over_word(Bef41),
+                                        {Bef42, Mod++[$:|Fun]};
+                                    _ -> {Bef4, Fun}
+                                end,
+                case {ModFun, is_binding(ModFun)} of
+                    {[],_} -> {Bef5, {parenthesis, Clause}};
+                    {"fun",_} -> throw({Bef5, {new_fun, Clause}});
+                    {Binding, true} -> 
+                        {Bef6, Fun2} = edlin_expand:over_word(Bef5),
+                        case Fun2 of
+                            "fun" -> throw({Bef6, {new_fun, Binding, Clause}});
+                            _ -> throw({error, length(Bef6)})
+                        end;
+                    {_,_} -> {Bef5, {call, ModFun++Clause}}
+                end
     end.
 over_keyword_or_fun(Bef1) ->
     case over_keyword_expression(Bef1) of
@@ -683,6 +706,65 @@ over_to_opening_paren(Stack, [Q,NEC|Bef], Word) when Q == $"; Q == $', NEC /= $$
     over_to_opening_paren(Stack, Bef1, QuotedWord ++ Word);
 over_to_opening_paren(CC, [C|Bef], Word) -> over_to_opening_paren(CC, Bef, [C|Word]).
 
+
+%% patterns we should support
+%% some:fun(X) when hej; svej -> yolo;
+%% |
+%% fun F(X) when hej; svej -> yolo;
+%% |
+%% some:fun(X) when hej,yolo; svej;|
+%% case Expr of
+%%   P when hej; svej -> yolo;
+%%   |
+%% should return {Bef, {"case", Expr, "of"}, [{"P", ["hej", "svej"], "yolo"}]} 
+%% case Expr of
+%%   P when hej,yolo; svej;|
+
+over_to_clause_opener(Bef) ->
+    case over_to_clause_opener(Bef, [], []) of
+        {[],[],_} -> {Bef, [], []}; %% TODO maybe return an error?
+        R -> R
+    end.
+over_to_clause_opener([], Clause, Clauses) -> {[], [], [Clause|Clauses]};
+over_to_clause_opener(">-"++Bef, Clause, Clauses) ->
+    %% Check if we have -> ...; or clause_opener Expr1 when Expr2;[Expr3]
+    %% otherwise we will have only Expr1
+    {Bef1, Guards} = case over_to_clause_opener(Bef, [], []) of
+        {Bef_, "when", Guards_} -> {Bef_, Guards_};
+        _ -> {Bef, []}
+    end,
+    {Bef2, P} = extract_argument2(Bef1),
+    over_to_clause_opener(Bef2, [], [{P, Guards, Clause}|Clauses]);
+over_to_clause_opener([$"|Bef], Clause, Clauses) ->
+    {Bef1, Quote} = over_to_opening_quote($", Bef),
+    over_to_clause_opener(Bef1, Quote ++ Clause, Clauses);
+over_to_clause_opener([$;|Bef], Clause, Clauses) ->
+    over_to_clause_opener(Bef, [], [Clause|Clauses]);
+over_to_clause_opener([C|Rest]=Bef, Clause, Clauses) ->
+    {Bef1, ClauseOpener} = is_clause_opener(Bef),
+    case ClauseOpener of
+        [] -> over_to_clause_opener(Rest, [C|Clause], Clauses);
+        _ -> {Bef1, ClauseOpener, [Clause|Clauses]}
+    end.
+
+is_clause_opener(Bef) ->
+    case edlin_expand:over_word(Bef) of
+        {Bef1, Keyword} ->
+            case lists:member(Keyword, [
+                "when","after", "else", "catch", "receive",
+                "try", "of", "fun", "if"]) of
+                true ->
+                    case Keyword of  
+                        "of" ->
+                            %% Read everything between case and of
+                            {Bef2, "case "++Expr} = over_keyword_expression(Bef1, []),
+                            {Bef2, {"case", Expr, "of"}};
+                        KW -> {Bef1, KW}
+                    end;
+                false -> {Bef, []}
+            end;
+        _ -> {Bef, []}
+    end.
 %% Extract a whole keyword expression
 %% Keyword<code>end
 %% Function expects a string of erlang code in reverse, and extracts everything
@@ -734,5 +816,5 @@ over_module(Bef, Fun)->
 is_binding(Word) ->
     Normalized = unicode:characters_to_nfc_list(Word),
     nomatch =/= re:run(Normalized,
-                       "^[_[:upper:]][[:alpha:]]*$",
+                       "^[_[:upper:]][[:alpha:][:digit:]]*$",
                        [unicode, ucp]).

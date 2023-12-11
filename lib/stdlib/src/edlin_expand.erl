@@ -96,10 +96,9 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
     Aft = proplists:get_value('after', Opts, []),
     {_Bef1, Word} = over_word(Bef0),
     {Res, Expansion, Matches} = case edlin_context:get_context(Bef0) of
-                 {string, {map, _Binding, Keys}} ->
+                 [{string, _UntilQuote}, {map, _Binding, Keys}| _Rest] ->
                     {_Bef_1, FieldWord0} = edlin_context:over_to_opening_quote($",Bef0),
                     FieldWord = lists:reverse(lists:nthtail(1,lists:reverse(FieldWord0))),
-                    %erlang:display({FieldWord, hej}),
                     {[$}|Aft1], _} = over_word(Aft),
                     {[$=|Aft2], _} = over_word(Aft1),
                     {_, _Var} = over_word(Aft2),
@@ -108,38 +107,39 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                         {no, [], []} -> expand_string(Bef0);
                         M -> M
                     end;
-                 {string, _Context} -> %erlang:display({Wow,2}),
+                 [{string, _UntilOpeningQuote}|_] -> %erlang:display({Wow,2}),
                     expand_string(Bef0);
                 %% TODO: Handle binaries as well
-                 {{string, String}, {map, Binding, Keys}} ->
-                    fold_results([expand_map(String++Word, Bs, Binding, Keys)]);
-                 {binding} ->
+                 %{{string, String}, {map, Binding, Keys}} ->
+                 %   fold_results([expand_map(String++Word, Bs, Binding, Keys)]);
+                 [{term, _, {var, Binding}}|_] ->
                     %% Find Bindings earlier on the line, and allow them in the suggestion as well
                     %% but only upto the function scope...
                     %% for now we can just support a prototype
                     BsX = lists:map(fun([X])->{list_to_atom(X), undefined} end, find(lists:reverse(_Bef1))),
                     Bs1 = Bs ++ BsX,
-                    expand_binding(Word, Bs1);
+                    expand_binding(Binding, Bs1);
 
-                 {term} -> expand_module_function(Bef0, FT);
-                 {term, _, {_, Unfinished}} -> 
+                 [{term}|_] -> expand_module_function(Bef0, FT);
+                 [{term, _, {_, Unfinished}}|_] -> 
                     expand_module_function(lists:reverse(Unfinished), FT);
-                 {error, _Column} ->
+                 [{error, _Column}|_] ->
+                    %% TODO Color everything beyond _Column up until the cursor, with underline and red?
                     {no, [], []};
-                 {function} -> expand_module_function(Bef0, FT);
-                 {function, _Mod} -> expand_module_function(Bef0, FT);
-                 {fun_} -> expand_module_function(Bef0, FT);
+                 [{function}|_] -> expand_module_function(Bef0, FT);
+                 [{function, _Mod}|_] -> expand_module_function(Bef0, FT);
+                 [{fun_}|_] -> expand_module_function(Bef0, FT);
 
-                 {fun_, Mod} -> expand_function_name(Mod, Word, "/", FT);
+                 [{fun_, Mod}|_] -> expand_function_name(Mod, Word, "/", FT);
 
                  %% Complete with arity in a 'fun mod:fun/' expression
-                 {fun_, Mod, Fun} ->
+                 [{fun_, Mod, Fun}|_] ->
                     Arities = [integer_to_list(A) || A <- get_arities(Mod, Fun)],
                     match(Word, Arities, "");
-                 {new_fun, _ArgsString} -> {no, [], []};
+                 [{new_fun, _ArgsString}|_] -> {no, [], []};
                  %% Suggest type of function parameter
                  %% Complete an unfinished list, tuple or map using type of function parameter
-                 {function, Mod, Fun, Args, Unfinished, Nesting} ->
+                 [{function, Mod, Fun, Args, Unfinished, Nesting}|_] ->
                     Mod2 = case Mod of
                         "user_defined" -> "shell_default";
                         _ -> Mod
@@ -156,7 +156,7 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                             fold_results([FunExpansion] ++ ModuleOrBifs ++ [Functions])
                     end;
 
-                 {map, [], Keys} ->
+                 [{map, [], Keys}|_] ->
                     %% Check for pattern match map
                     erlang:display({hej, Aft}),
                     {[$}|Aft1], _} = over_word(Aft),
@@ -183,12 +183,12 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                     %% = Binding
                     
                  %% Complete an unfinished key or suggest valid keys of a map binding
-                 {map, Binding, Keys}->
+                 [{map, Binding, Keys}|_] ->
                     %% If we now its a Map, and we have 
                     %erlang:display({W,3}),
                     expand_map(Word, Bs, Binding, Keys);
 
-                 {map_or_record} ->
+                 [{map_or_record}|_] ->
                      {[$#|Bef2], _} = over_word(Bef0),
                      {_, Var} = over_word(Bef2),
                      case Bs of
@@ -208,8 +208,8 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                              end
                      end;
 
-                 {record} -> expand_record(Word, RT);
-                 {record, Mod} ->
+                 [{record}|_] -> expand_record(Word, RT);
+                 [{record, Mod}|_] ->
                     %% In theory, we should now what the name of the record should be
                     %% in function completion.. Maybe we can use that to make a more
                     %% robust expansion
@@ -227,7 +227,8 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                             expand_record(Word, RT1);
                         Matches2 -> Matches2
                     end;
-                 {record, Mod, Record, Fields, FieldToComplete, Args, Unfinished, Nestings} ->
+                 [{record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings},
+                    {function, Mod, _, _, _, _}|_] ->
                     %% Record in RT?
                     RT1 = case proplists:is_defined(Record, RT) of
                         true -> RT;
@@ -237,7 +238,7 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                     end,
                     expand_record_fields(FieldToComplete, Unfinished, Record, Fields, RT1, Args, Nestings, FT);
 
-                 {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings} ->
+                 [{record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings}|_] ->
                      expand_record_fields(FieldToComplete, Unfinished, Record, Fields, RT, Args, Nestings, FT);
                  _ -> {no, [], []}
 
