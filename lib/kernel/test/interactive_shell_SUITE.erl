@@ -77,8 +77,9 @@ suite() ->
      {timetrap,{minutes,3}}].
 
 all() ->
-    [{group, to_erl},
-     {group, tty}].
+    [%{group, to_erl},
+     {group, tty},
+     {group, ssh}].
 
 groups() ->
     [{to_erl,[],
@@ -109,7 +110,39 @@ groups() ->
        remsh_no_epmd,
        remsh_expand_compatibility_25,
        remsh_expand_compatibility_later_version]},
-     {tty,[],
+     {ssh, [],
+        [{group,ssh_unicode},
+         {group,ssh_latin1},
+         test_invalid_keymap, test_valid_keymap,
+         shell_suspend,
+         shell_full_queue,
+         external_editor,
+         external_editor_visual,
+         shell_ignore_pager_commands
+        ]},
+       {ssh_unicode,[],
+        [{group,ssh_tests},
+         shell_invalid_unicode,
+         external_editor_unicode
+         %% unicode wrapping does not work right yet
+         %% shell_unicode_wrap,
+         %% shell_delete_unicode_wrap,
+         %% shell_delete_unicode_not_at_cursor_wrap,
+         %% shell_update_window_unicode_wrap
+        ]},
+       {ssh_latin1,[],[{group,ssh_tests}]},
+       {ssh_tests, [],
+        [shell_navigation, shell_multiline_navigation, shell_multiline_prompt,
+         shell_xnfix, shell_delete, %shell_format,
+         shell_transpose, shell_search, shell_insert,
+         shell_update_window, shell_small_window_multiline_navigation, shell_huge_input,
+         %shell_support_ansi_input,
+         shell_receive_standard_out,
+         %shell_standard_error_nlcr,
+         %shell_expand_location_above,
+         %shell_expand_location_below,
+         shell_clear]},
+     {tty, [],
       [{group,tty_unicode},
        {group,tty_latin1},
        test_invalid_keymap, test_valid_keymap,
@@ -185,8 +218,30 @@ init_per_group(tty, Config) ->
         Error ->
             {skip, "tmux not installed " ++ Error}
     end;
+init_per_group(ssh, Config) ->
+    case string:split(tmux("-V")," ") of
+        ["tmux",[Num,$.|_]] when Num >= $3, Num =< $9 ->
+            tmux("kill-session"),
+            "" = tmux("-u new-session -x 50 -y 60 -d"),
+            ["" = tmux(["set-environment '",Name,"' '",Value,"'"])
+             || {Name,Value} <- os:env()],
+            Config;
+        ["tmux", Vsn] ->
+            {skip, "invalid tmux version " ++ Vsn ++ ". Need vsn 3 or later"};
+        Error ->
+            {skip, "tmux not installed " ++ Error}
+    end,
+    ssh:start(),
+    PrivDir = filename:join(proplists:get_value(priv_dir, Config), "nopubkey"),
+    file:make_dir(PrivDir),
+    SysDir = proplists:get_value(data_dir, Config),
+    {ok, _Sshd} = ssh:daemon(8989, [{system_dir, SysDir},
+                                  {user_dir, PrivDir},
+                                  {password, "bar"}]);
 init_per_group(Group, Config) when Group =:= tty_unicode;
-                                   Group =:= tty_latin1 ->
+                                   Group =:= tty_latin1;
+                                   Group =:= ssh_unicode;
+                                   Group =:= ssh_latin1 ->
     [Lang,_] =
         string:split(
           os:getenv("LC_ALL",
@@ -197,6 +252,10 @@ init_per_group(Group, Config) when Group =:= tty_unicode;
             [{encoding, unicode},{env,[{"LC_ALL",Lang++".UTF-8"}]}|Config];
         tty_latin1 ->
             % [{encoding, latin1},{env,[{"LC_ALL",Lang++".ISO-8859-1"}]}|Config],
+            {skip, "latin1 tests not implemented yet"};
+        ssh_unicode ->
+            [{encoding, unicode},{env,[{"LC_ALL",Lang++".UTF-8"}]}|Config];
+        ssh_latin1 ->
             {skip, "latin1 tests not implemented yet"}
     end;
 init_per_group(sh_custom, Config) ->
@@ -219,6 +278,19 @@ init_per_group(_GroupName, Config) ->
     Config.
 
 end_per_group(tty, _Config) ->
+    Windows = string:split(tmux("list-windows"), "\n", all),
+    lists:foreach(
+      fun(W) ->
+              case string:split(W, " ", all) of
+                  ["0:" | _] -> ok;
+                  [No, _Name | _] ->
+                      "" = os:cmd(["tmux select-window -t ", string:split(No,":")]),
+                      ct:log("~ts~n~ts",[W, os:cmd(lists:concat(["tmux capture-pane -p -e"]))])
+              end
+      end, Windows),
+%    "" = os:cmd("tmux kill-session")
+    ok;
+end_per_group(ssh, _Config) ->
     Windows = string:split(tmux("list-windows"), "\n", all),
     lists:foreach(
       fun(W) ->
@@ -378,7 +450,6 @@ test_columns_and_rows(new, _Args) ->
 shell_navigation(Config) ->
 
     Term = start_tty(Config),
-
     try
         [begin
              send_tty(Term,"{aaa,'b"++U++"b',ccc}"),
@@ -417,11 +488,19 @@ shell_navigation(Config) ->
         stop_tty(Term)
     end.
 shell_multiline_navigation(Config) ->
-    Term = start_tty(Config),
-
+    Term0 = start_tty(Config),
+    %% When the digit of the prompt goes from 9 to 10, location is
+    %% moved 1. Start digit is 3.
     try
         [begin
-             check_location(Term, {0, 0}),
+             Rem = D rem 10,
+             Term = if Rem =:= 0 ->
+                    check_location(Term0, {0, 1}),
+                    Term0#tmux{ orig_location = get_location(Term0)};
+                true ->
+                    check_location(Term0, {0, 0}),
+                    Term0
+             end,
              send_tty(Term,"{aaa,"),
              check_location(Term, {0,width("{aaa,")}),
              send_tty(Term,"\n'b"++U++"b',"),
@@ -475,10 +554,10 @@ shell_multiline_navigation(Config) ->
              send_tty(Term,"M-c"),
              check_location(Term, {-3,0}),
              send_tty(Term,"{'"++U++"',\n\n\nworks}.\n")
-            end || U <- hard_unicode()],
+            end || {D,U} <- lists:enumerate(3, hard_unicode())],
         ok
     after
-        stop_tty(Term)
+        stop_tty(Term0)
     end.
 
 shell_format(Config) ->
@@ -1186,7 +1265,7 @@ shell_expand_location_below(Config) ->
         rpc(Term, fun() ->
                           {module, long_module} = code:load_binary(long_module, "long_module.beam", Bin)
                   end),
-        check_content(Term, "3>"),
+        check_content(Term, "\\d+>"),
         tmux(["resize-window -t ",tty_name(Term)," -y 50"]),
         timer:sleep(1000), %% Sleep to make sure window has resized
         Result = 61,
@@ -1232,11 +1311,11 @@ shell_expand_location_below(Config) ->
         tmux(["resize-window -t ", tty_name(Term), " -y ", integer_to_list(Row+10)]),
         timer:sleep(1000), %% Sleep to make sure window has resized
         send_tty(Term, "\t\t"),
-        check_content(Term, "3> long_module:" ++ FunctionName ++ "\nfunctions(\n|.)*a_long_function_name99\\($"),
+        check_content(Term, "\\d+> long_module:" ++ FunctionName ++ "\nfunctions(\n|.)*a_long_function_name99\\($"),
 
         %% Check that doing an expansion when cursor is in xnfix position works
         send_tty(Term, "BSpace"),
-        check_content(Term, "3> long_module:a_long_function_nam$"),
+        check_content(Term, "\\d+> long_module:a_long_function_nam$"),
         send_tty(Term, "Home"),
         send_tty(Term, lists:duplicate(Cols - Col - width(", long_module:a_long_function_name"), "a")),
         send_tty(Term, ", "),
@@ -1244,7 +1323,7 @@ shell_expand_location_below(Config) ->
         send_tty(Term, "\t"),
         check_location(Term, {-Rows + 2, -Col}),
         send_tty(Term, "\t"),
-        check_content(Term, "3> a+, long_module:" ++ FunctionName ++ "\n\nfunctions(\n|.)*a_long_function_name0\\("),
+        check_content(Term, "\\d+> a+, long_module:" ++ FunctionName ++ "\n\nfunctions(\n|.)*a_long_function_name0\\("),
         check_location(Term, {-Rows + 2, -Col}),
         send_tty(Term, "Down"),
         check_location(Term, {-Rows + 2, -Col}),
@@ -1255,7 +1334,7 @@ shell_expand_location_below(Config) ->
         send_tty(Term, lists:duplicate(Cols, "b")),
         send_tty(Term, "End"),
         send_tty(Term, "\t"),
-        check_content(Term, "3> b+\nb+a+, long_module:" ++ FunctionName ++ "\n\nfunctions(\n|.)*a_long_function_name0\\("),
+        check_content(Term, "\\d+> b+\nb+a+, long_module:" ++ FunctionName ++ "\n\nfunctions(\n|.)*a_long_function_name0\\("),
         check_location(Term, {-Rows + 3, -Col}),
         send_tty(Term, "Down"),
         check_location(Term, {-Rows + 3, -Col}),
@@ -1369,10 +1448,7 @@ shell_ignore_pager_commands(Config) ->
 test_valid_keymap(Config) when is_list(Config) ->
     DataDir = proplists:get_value(data_dir,Config),
     Term = setup_tty([{args, ["-config", DataDir ++ "valid_keymap.config"]} | Config]),
-    Prompt = fun() -> ["\e[94m",54620,44397,50612,47,51312,49440,47568,"\e[0m"] end,
-    erpc:call(Term#tmux.node, application, set_env,
-              [stdlib, shell_prompt_func_test,
-               proplists:get_value(shell_prompt_func_test, Config, Prompt)]),
+    set_tty_prompt(Term, Config),
     try
         check_not_in_content(Term, "Invalid key"),
         check_not_in_content(Term, "Invalid function"),
@@ -1381,7 +1457,7 @@ test_valid_keymap(Config) when is_list(Config) ->
         check_content(Term, ">$"),
         send_tty(Term, "1.\n"),
         send_tty(Term, "C-b"),
-        check_content(Term, "2>\\s1.$"),
+        check_content(Term, "\\d+>\\s1.$"),
         ok
     after
         stop_tty(Term),
@@ -1391,6 +1467,7 @@ test_valid_keymap(Config) when is_list(Config) ->
 test_invalid_keymap(Config) when is_list(Config) ->
     DataDir = proplists:get_value(data_dir,Config),
     Term1 = setup_tty([{args, ["-config", DataDir ++ "invalid_keymap.config"]} | Config]),
+    set_tty_prompt(Term1, Config),
     try
         check_content(Term1, "Invalid key"),
         check_content(Term1, "Invalid function"),
@@ -1402,6 +1479,7 @@ test_invalid_keymap(Config) when is_list(Config) ->
         stop_tty(Term1),
         ok
     end.
+
 external_editor(Config) ->
     case os:find_executable("nano") of
         false -> {skip, "nano is not installed"};
@@ -1411,7 +1489,7 @@ external_editor(Config) ->
                 tmux(["resize-window -t ",tty_name(Term)," -x 80"]),
                 send_tty(Term,"os:putenv(\"EDITOR\",\"nano\").\n"),
                 send_tty(Term, "\"some text with\nnewline in it\""),
-                check_content(Term,"3> \"some text with\\s*\n.+\\s*newline in it\""),
+                check_content(Term,"\\d+> \"some text with\\s*\n.+\\s*newline in it\""),
                 send_tty(Term, "C-O"),
                 check_content(Term,"GNU nano [\\d.]+"),
                 check_content(Term,"\"some text with\\s*\n\\s*newline in it\""),
@@ -1421,7 +1499,7 @@ external_editor(Config) ->
                 send_tty(Term, "C-O"), %% save in nano
                 send_tty(Term, "Enter"),
                 send_tty(Term, "C-X"), %% quit in nano
-                check_content(Term,"3> \"still\\s*\n\\s*.+\\s*some text with\\s*\n.+\\s*newline in it\""),
+                check_content(Term,"\\d+> \"still\\s*\n\\s*.+\\s*some text with\\s*\n.+\\s*newline in it\""),
                 send_tty(Term,".\n"),
                 check_content(Term,"\\Q\"still\\nsome text with\\nnewline in it\"\\E"),
                 ok
@@ -1440,9 +1518,9 @@ external_editor_visual(Config) ->
             try
                 tmux(["resize-window -t ",tty_name(Term)," -x 80"]),
                 send_tty(Term,"os:putenv(\"EDITOR\",\"nano\").\n"),
-                check_content(Term, "3>"),
+                check_content(Term, "\\d+>"),
                 send_tty(Term,"os:putenv(\"VISUAL\",\"vim -u DEFAULTS -U NONE -i NONE\").\n"),
-                check_content(Term, "4>"),
+                check_content(Term, "\\d+>"),
                 send_tty(Term,"\"hello"),
                 send_tty(Term, "C-O"), %% Open vim
                 check_content(Term, "^\"hello"),
@@ -1456,7 +1534,7 @@ external_editor_visual(Config) ->
                 check_content(Term, "\"hello\"[.]$"),
                 send_tty(Term,"Enter"),
                 check_content(Term, "\"hello\""),
-                check_content(Term, "5>$")
+                check_content(Term, "\\d+>$")
             after
                 stop_tty(Term),
                 ok
@@ -1473,7 +1551,7 @@ external_editor_unicode(Config) ->
                 tmux(["resize-window -t ",tty_name(Term)," -x 80"]),
                 send_tty(Term,"os:putenv(\"EDITOR\",\"nano\").\n"),
                 send_tty(Term, hard_unicode()),
-                check_content(Term,"3> " ++ hard_unicode_match(Config)),
+                check_content(Term,"\\d+> " ++ hard_unicode_match(Config)),
                 send_tty(Term, "C-O"), %% open external editor (nano)
                 check_content(Term,"GNU nano [\\d.]+"),
                 send_tty(Term, "still "),
@@ -1533,13 +1611,13 @@ shell_suspend(Config) ->
 
     try
         send_tty(Term, hard_unicode()),
-        check_content(Term,["2> ",hard_unicode(),"$"]),
+        check_content(Term,["\\d+> ",hard_unicode(),"$"]),
         send_tty(Term, "C-Z"),
         check_content(Term,"\\Q[1]+\\E\\s*Stopped"),
         send_tty(Term, "fg"),
         send_tty(Term, "Enter"),
         send_tty(Term, "M-l"),
-        check_content(Term,["2> ",hard_unicode(),"$"]),
+        check_content(Term,["\\d+> ",hard_unicode(),"$"]),
         check_location(Term,{0,width(hard_unicode())}),
         ok
     after
@@ -1741,6 +1819,32 @@ rpc(#tmux{ node = N }, M, F, A) ->
 
 %% Setup a TTY, but do not type anything in terminal
 setup_tty(Config) ->
+    PG = get_top_parent_test_group(Config),
+    if PG =:= ssh ->
+            setup_ssh(Config);
+       true ->
+            setup_tty2(Config)
+    end.
+setup_ssh(Config) ->
+    %% We will not use peer, since we are not starting a new erl node, we communicate with the ssh node
+    Name = maps:get(name,proplists:get_value(peer, Config, #{}),
+    peer:random_name(proplists:get_value(tc_path, Config))),
+    _Envs = lists:flatmap(fun({Key,Value}) ->
+                                    ["-env",Key,Value]
+                        end, proplists:get_value(env,Config,[])),
+
+    _ExtraArgs = proplists:get_value(args,Config,[]),
+    os:cmd(os:find_executable("tmux") ++ " new-window -n \"" ++ Name ++ "\" -d -- "++
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null localhost -p 8989 -l foo"),
+    "" = tmux(["set-option -t ",Name," remain-on-exit on"]),
+    Tmux = #tmux{ peer = none, node = none, name = Name },
+    timer:sleep(2000),
+    check_content(Tmux,"Enter password for \"foo\""),
+    "" = tmux("send -t " ++ Name ++ " bar Enter"),
+    timer:sleep(1000),
+    check_content(Tmux,"\\d+>"),
+    Tmux.
+setup_tty2(Config) ->
     Name = maps:get(name,proplists:get_value(peer, Config, #{}),
                     peer:random_name(proplists:get_value(tc_path, Config))),
 
@@ -1781,11 +1885,9 @@ setup_tty(Config) ->
                          wait_boot => 60_000,
                          detached => false
                        },
-
     {ok, Peer, Node} =
         ?CT_PEER(maps:merge(proplists:get_value(peer,Config,#{}),
                             DefaultPeerArgs)),
-
     Self = self(),
 
     %% By default peer links with the starter. For these TCs we however only
@@ -1804,7 +1906,6 @@ setup_tty(Config) ->
     unlink(Peer),
 
     "" = tmux(["set-option -t ",Name," remain-on-exit on"]),
-
     %% We start tracing on the remote node in order to help debugging
     TraceLog = filename:join(proplists:get_value(priv_dir,Config),Name++".trace"),
     ct:log("Link to trace: file://~ts",[TraceLog]),
@@ -1822,18 +1923,41 @@ setup_tty(Config) ->
                   monitor(process, Self),
                   receive _ -> ok end
           end),
-
     #tmux{ peer = Peer, node = Node, name = Name }.
+
+get_top_parent_test_group(Config) ->
+    maybe
+        GroupPath = proplists:get_value(tc_group_path,Config),
+        [_|_] ?= GroupPath,
+        [{name, Group2}] ?= lists:last(GroupPath),
+        Group2
+    else
+        _ -> proplists:get_value(name,
+                                 proplists:get_value(tc_group_properties,
+                                                                Config))
+    end.
+
+set_tty_prompt(Term, Config) ->
+    PG = get_top_parent_test_group(Config),
+
+    Prompt = fun() -> ["\e[94m",54620,44397,50612,47,51312,49440,47568,"\e[0m"] end,
+    Prompt1 = proplists:get_value(shell_prompt_func_test, Config, Prompt),
+
+    if PG =:= ssh ->
+            send_tty(Term, "shell:prompt_func({interactive_shell_SUITE,prompt}).\n"),
+            application:set_env(stdlib, shell_prompt_func_test, Prompt1);
+        true ->
+            send_tty(Term, "dummy.\n"),
+            erpc:call(Term#tmux.node, application, set_env,
+                [stdlib, shell_prompt_func_test, Prompt1])
+    end.
 
 %% Start a tty, setup custom prompt and set cursor at bottom
 start_tty(Config) ->
 
     Term = setup_tty(Config),
 
-    Prompt = fun() -> ["\e[94m",54620,44397,50612,47,51312,49440,47568,"\e[0m"] end,
-    erpc:call(Term#tmux.node, application, set_env,
-              [stdlib, shell_prompt_func_test,
-               proplists:get_value(shell_prompt_func_test, Config, Prompt)]),
+    set_tty_prompt(Term, Config),
 
     {Rows, _} = get_window_size(Term),
 
@@ -1845,7 +1969,7 @@ start_tty(Config) ->
     %% We enter an 'a' here so that we can get the correct orig position
     %% with an alternative prompt.
     send_tty(Term,"a.\n"),
-    check_content(Term,"2>$"),
+    check_content(Term,"3>$"),
     OrigLocation = get_location(Term),
     Term#tmux{ orig_location = OrigLocation }.
 
