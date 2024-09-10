@@ -106,7 +106,7 @@
 %%        to previous line automatically.
 
 -export([init/1, reinit/2, isatty/1, handles/1, unicode/1, unicode/2,
-         handle_signal/2, window_size/1, handle_request/2, write/2, write/3,
+         handle_signal/2, window_size/1, update_geometry/3, handle_request/2, write/2, write/3,
          npwcwidth/1, npwcwidth/2,
          ansi_regexp/0, ansi_color/2]).
 -export([reader_stop/1, disable_reader/1, enable_reader/1, is_reader/2, is_writer/2]).
@@ -167,6 +167,7 @@
 
 -type options() :: #{ tty => boolean(),
                       input => boolean(),
+                      output => boolean(),
                       canon => boolean(),
                       echo => boolean(),
                       sig => boolean()
@@ -250,7 +251,6 @@ window_size(State = #state{ tty = TTY }) ->
 
 -spec init(options()) -> state().
 init(UserOptions) when is_map(UserOptions) ->
-
     Options = options(UserOptions),
     {ok, TTY} = tty_create(),
 
@@ -271,10 +271,11 @@ init(UserOptions) when is_map(UserOptions) ->
                      true -> UnicodeSupported
                   end,
     {ok, ANSI_RE_MP} = re:compile(?ANSI_REGEXP, [unicode]),
+ 
     init_term(#state{ tty = TTY, unicode = UnicodeMode, options = Options, ansi_regexp = ANSI_RE_MP }).
 init_term(State = #state{ tty = TTY, options = Options }) ->
     TTYState =
-        case maps:get(tty, Options) of
+        case maps:get(tty, Options) andalso maps:get(output, Options) of
             true ->
                 %% If a reader has been started already, we disable it to avoid race conditions when
                 %% upgrading the terminal
@@ -293,14 +294,16 @@ init_term(State = #state{ tty = TTY, options = Options }) ->
                     [enable_reader(State) || State#state.reader =/= undefined]
                 end;
             false ->
-                State
+                init(State, os:type())
         end,
-
     WriterState =
-        if TTYState#state.writer =:= undefined ->
+        case {maps:get(output, Options), TTYState#state.writer} of
+            {true, undefined} ->
                 {ok, Writer} = proc_lib:start_link(?MODULE, writer, [State#state.tty]),
                 TTYState#state{ writer = Writer };
-           true ->
+            {true, _} ->
+                TTYState;
+            {false, undefined} ->
                 TTYState
         end,
     ReaderState =
@@ -328,6 +331,7 @@ reinit(State, UserOptions) ->
 options(UserOptions) ->
     maps:merge(
       #{ input => true,
+         output => true,
          tty => true,
          canon => false,
          echo => false }, UserOptions).
@@ -1117,6 +1121,9 @@ update_geometry(State) ->
             ?dbg({?FUNCTION_NAME, _Error}),
             State
     end.
+%% Functions for non ttys to update the geometry.
+update_geometry(State, NewCols, NewRows) ->
+    State#state{cols = NewCols, rows = NewRows}.
 
 npwcwidth(Char) ->
     npwcwidth(Char, true).

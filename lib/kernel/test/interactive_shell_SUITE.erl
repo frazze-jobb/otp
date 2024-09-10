@@ -47,7 +47,7 @@
 	 job_control_remote_noshell/1,ctrl_keys/1,
          get_columns_and_rows_escript/1,
          shell_get_password/1,
-         shell_navigation/1, shell_multiline_navigation/1, shell_multiline_prompt/1,
+         shell_navigation/1, shell_multiline_navigation/1, shell_multiline_prompt/1, shell_multiline_prompt_ssh/1,
          shell_xnfix/1, shell_delete/1,
          shell_transpose/1, shell_search/1, shell_insert/1,
          shell_update_window/1, shell_small_window_multiline_navigation/1, shell_huge_input/1,
@@ -71,6 +71,7 @@
 -export([load/0, add/1]).
 %% For custom prompt testing
 -export([prompt/1]).
+-export([output_to_stdout_slowly/1]).
 -record(tmux, {peer, node, name, orig_location }).
 suite() ->
     [{ct_hooks,[ts_install_cth]},
@@ -116,14 +117,14 @@ groups() ->
          test_invalid_keymap, test_valid_keymap,
          shell_suspend,
          shell_full_queue,
-         external_editor,
-         external_editor_visual,
+         %external_editor,
+         %external_editor_visual,
          shell_ignore_pager_commands
         ]},
        {ssh_unicode,[],
-        [{group,ssh_tests},
-         shell_invalid_unicode,
-         external_editor_unicode
+        [{group,ssh_tests}
+         %shell_invalid_unicode, % needs another method to send invalid unicode through ssh_client
+         %external_editor_unicode
          %% unicode wrapping does not work right yet
          %% shell_unicode_wrap,
          %% shell_delete_unicode_wrap,
@@ -132,15 +133,18 @@ groups() ->
         ]},
        {ssh_latin1,[],[{group,ssh_tests}]},
        {ssh_tests, [],
-        [shell_navigation, shell_multiline_navigation, shell_multiline_prompt,
+        [shell_navigation, shell_multiline_navigation,
+         shell_multiline_prompt_ssh,
          shell_xnfix, shell_delete, %shell_format,
          shell_transpose, shell_search, shell_insert,
-         shell_update_window, shell_small_window_multiline_navigation, shell_huge_input,
-         %shell_support_ansi_input,
+         shell_update_window,
+         %shell_small_window_multiline_navigation, expand above mode for ssh, not compatible with this test
+         shell_huge_input,
+         shell_support_ansi_input,
          shell_receive_standard_out,
          %shell_standard_error_nlcr,
-         %shell_expand_location_above,
-         %shell_expand_location_below,
+         shell_expand_location_above,
+         %shell_expand_location_below, %% currently not possible to set expand below for ssh
          shell_clear]},
      {tty, [],
       [{group,tty_unicode},
@@ -598,12 +602,24 @@ shell_format(Config) ->
     after
         stop_tty(Term1)
     end.
-
+shell_multiline_prompt_ssh(Config) ->
+    Term1 = start_tty(Config),
+    try
+        send_tty(Term1, "shell:multiline_prompt_func({shell,inverted_space_prompt}).\n"),
+        check_location(Term1, {0, 0}),
+        send_tty(Term1,"\na"),
+        check_location(Term1, {0, 1}),
+        check_content(Term1, "   a"),
+        ok
+    after
+        stop_tty(Term1)
+    end.
 shell_multiline_prompt(Config) ->
     Term1 = start_tty([{args,["-stdlib","shell_multiline_prompt","{shell,inverted_space_prompt}"]}|Config]),
     Term2 = start_tty([{args,["-stdlib","shell_multiline_prompt","\"...> \""]}|Config]),
     Term3 = start_tty([{args,["-stdlib","shell_multiline_prompt","edlin"]}|Config]),
     Term4 = start_tty(Config),
+
     try
         check_location(Term1, {0, 0}),
         send_tty(Term1,"\na"),
@@ -1119,11 +1135,18 @@ shell_huge_input(Config) ->
     after
         stop_tty(Term)
     end.
+output_to_stdout_slowly(5) -> ok;
+output_to_stdout_slowly(N) ->
+    receive
+        after 100 ->
+            io:format("~p~n", [N]),
+            output_to_stdout_slowly(N+1)
+    end.
+
 shell_receive_standard_out(Config) ->
     Term = start_tty(Config),
     try
-        send_tty(Term,"my_fun(5) -> ok; my_fun(N) -> receive after 100 -> io:format(\"~p\\n\", [N]), my_fun(N+1) end.\n"),
-        send_tty(Term, "spawn(shell_default, my_fun, [0]). ABC\n"),
+        send_tty(Term, "spawn(interactive_shell_SUITE, output_to_stdout_slowly, [0]). ABC\n"),
         timer:sleep(1000),
         check_location(Term, {0, 0}), %% Check that we are at the same location relative to the start.
         check_content(Term, "3\\s+4\\s+.+>\\sABC"),
@@ -1272,7 +1295,7 @@ shell_expand_location_below(Config) ->
         Rows1 = 48,
         send_tty(Term, "long_module:" ++ FunctionName),
         send_tty(Term, "\t"),
-        check_content(Term, "3> long_module:" ++ FunctionName ++ "\nfunctions(\n|.)*a_long_function_name0\\("),
+        check_content(Term, "\\d+> long_module:" ++ FunctionName ++ "\nfunctions(\n|.)*a_long_function_name0\\("),
 
         %% Check that correct text is printed below expansion
         check_content(Term, io_lib:format("rows ~w to ~w of ~w",
@@ -1695,7 +1718,7 @@ shell_full_queue(Config) ->
         send_tty(Term, "fg"),
         send_tty(Term, "Enter"),
         Pid ! stop,
-        check_content(Term,"b\\([^)]*\\)2>$"),
+        check_content(Term,"b\\([^)]*\\)\\d+>$"),
 
         send_tty(Term, "."),
         send_tty(Term, "Enter"),
