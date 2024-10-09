@@ -18,4 +18,7 @@ export DISPLAY=:99
 
 PATH="$PATH:$(ls -1d /usr/local/lib/erlang-*/bin | tr '\n' ':')"
 
+echo "which erlc is selected first?"
+which erlc
+
 exec /bin/bash -c "$1"

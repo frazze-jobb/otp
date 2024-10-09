@@ -33,3 +33,5 @@ RUN echo "export MAKEFLAGS=$MAKEFLAGS" > /buildroot/env.sh && \
     echo "export ERL_TOP=\"$ERL_TOP\"" >> /buildroot/env.sh && \
     echo "export PATH=\"$PATH\"" >> /buildroot/env.sh && \
     echo "export ERL_LIBS=\"$ERL_LIBS\"" >> /buildroot/env.sh
+
+RUN cat /buildroot/env.sh
