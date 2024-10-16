@@ -972,6 +972,8 @@ split_cols(_N, [], Acc, Chars, Cols, _Unicode) ->
     {Chars, Cols, Acc, []};
 split_cols(N, [Char | T], Acc, Cnt, Cols, Unicode) when is_integer(Char) ->
     split_cols(N - npwcwidth(Char), T, [Char | Acc], Cnt + 1, Cols + npwcwidth(Char, Unicode), Unicode);
+split_cols(N, [[Char, ZW_J_NJ| GC]|T], Acc, Cnt, Cols, Unicode) when ZW_J_NJ =:= 16#200c; ZW_J_NJ =:= 16#200d ->
+    split_cols(N, [[Char|GC]|T], [ZW_J_NJ|Acc], Cnt+1, Cols+0, Unicode);
 split_cols(N, [Chars | T], Acc, Cnt, Cols, Unicode) when is_list(Chars) ->
     split_cols(N - length(Chars), T, [Chars | Acc],
                Cnt + length(Chars), Cols + cols(Chars, Unicode), Unicode).
@@ -991,6 +993,13 @@ split(_N, [], Acc, Chars, Cols, _Unicode) ->
     {Chars, Cols, Acc, []};
 split(N, [Char | T], Acc, Cnt, Cols, Unicode) when is_integer(Char) ->
     split(N - 1, T, [Char | Acc], Cnt + 1, Cols + npwcwidth(Char, Unicode), Unicode);
+split(N, [[Char, ZW_J_NJ | GC]|T], Acc, Cnt, Cols, Unicode) when ZW_J_NJ =:= 16#200c; ZW_J_NJ =:= 16#200d ->
+    %% Edlin has commanded we remove the whole grapheme cluster, which edlin have knowledge of.
+    %% This means that in the case we have [$a, 16#200c, 16#200c] in edlin, then edlin will say 3. This includes the character the 
+    %% ZWJ and ZWNJ characters have bound to, in this case $a. If we have only [16#200c, 16#200c] in edlin then we have
+    %% [32, 16#200c, 16#200c] in prim_tty. Edlin will report 2.
+    %% we will then call split(0, [[32]|T], Cnt+1, Cols+0, Unicode)
+    split(N-1, [[Char|GC]|T], [ZW_J_NJ|Acc], Cnt+1, Cols+0, Unicode);
 split(N, [Chars | T], Acc, Cnt, Cols, Unicode) when is_list(Chars) ->
     split(N - length(Chars), T, [Chars | Acc],
           Cnt + length(Chars), Cols + cols(Chars, Unicode), Unicode);
