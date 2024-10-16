@@ -830,6 +830,10 @@ io_request(delete_line, TTY) ->
     write(prim_tty:handle_request(TTY, delete_line));
 io_request({put_chars, unicode, Chars}, TTY) ->
     write(prim_tty:handle_request(TTY, {putc, unicode:characters_to_binary(Chars)}));
+io_request({put_chars_sync, latin1, Bin, Reply}, TTY) when is_binary(Bin) ->
+    {Output, NewTTY} = prim_tty:handle_request(TTY, {putc_raw, Bin}),
+    {ok, MonitorRef} = prim_tty:write(NewTTY, Output, self()),
+    {Reply, MonitorRef, NewTTY};
 io_request({put_chars_sync, unicode, Chars, Reply}, TTY) ->
     {Output, NewTTY} = prim_tty:handle_request(TTY, {putc, unicode:characters_to_binary(Chars)}),
     {ok, MonitorRef} = prim_tty:write(NewTTY, Output, self()),

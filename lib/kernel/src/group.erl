@@ -584,9 +584,19 @@ putc_request({put_chars,unicode,M,F,As}, Drv, From) ->
             end
     end;
 putc_request({put_chars,latin1,Binary}, Drv, From) when is_binary(Binary) ->
-    send_drv(Drv, {put_chars_sync, unicode,
+    send_drv(Drv, get_unicode_state),
+    receive
+        {Drv,get_unicode_state,false} ->
+            send_drv(Drv, {put_chars_sync, latin1, Binary, From});
+        {Drv,get_unicode_state,true} ->
+            send_drv(Drv, {put_chars_sync, unicode,
                    unicode:characters_to_binary(Binary,latin1),
-                   From}),
+                   From})
+    after 1000 ->
+            send_drv(Drv, {put_chars_sync, unicode,
+                   unicode:characters_to_binary(Binary,latin1),
+                   From})
+    end,
     noreply;
 putc_request({put_chars,latin1,Chars}, Drv, From) ->
     case catch unicode:characters_to_binary(Chars,latin1) of
