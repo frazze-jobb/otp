@@ -276,6 +276,9 @@ int main(int argc, char** argv)
     eargv = eargv_base;
     eargc = 0;
     PUSH(strsave(emulator));
+    if (emulator != env && strcmp(emulator, ERL_NAME) != 0) {
+        free(emulator);
+    }
     eargc_base = eargc;
     eargv = eargv + eargv_size/2;
     eargc = 0;
