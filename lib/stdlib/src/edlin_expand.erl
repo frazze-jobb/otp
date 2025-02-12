@@ -169,6 +169,7 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                  {binding} -> expand_binding(Word, Bs);
 
                  {term} -> expand_module_function(Bef0, FT);
+                 {term, [], []} -> expand_module_function(Bef0, FT);
                  {term, _, {_, Unfinished}} -> expand_module_function(lists:reverse(Unfinished), FT);
                  {error, _Column} ->
                     {no, [], []};
@@ -830,7 +831,7 @@ expand_module_function(Bef0, FT) ->
             {no, [], []};
         {[], _, _} ->
             case Word of
-                [] -> {no, [], []}; %fold_results([expand_shell_default(Word), expand_user_defined_functions(FT, Word)]);
+                [] -> fold_results(expand_helper(FT, all, Word, ":"));
                 _ -> fold_results(expand_helper(FT, all, Word, ":"))
             end;
         {_,_,_} ->
@@ -901,14 +902,101 @@ expand_user_defined_functions(FT, Prefix) ->
         {Res,Expansion, Matches} -> {Res,Expansion,[#{title=>"user_defined", elems=>Matches, options=>[highlight_all]}]}
     end.
 
-expand_module_name("",_) ->
-    {no, [], []};
+groups_for_modules(Mod) ->
+    Groups = #{
+        "SHELL" => [shell, shell_default, c, shell_docs, edlin, edlin_expand],
+        "PROCESSES" => [
+          gen_event,
+          gen_fsm,
+          gen_server,
+          gen_statem,
+          pool,
+          proc_lib,
+          supervisor,
+          supervisor_bridge,
+          sys,
+          log_mf_h
+        ],
+        "STRINGS" => [
+          uri_string,
+          unicode,
+          string,
+          re,
+          io,
+          io_lib,
+          filelib,
+          filename,
+          file_sorter,
+          base64,
+          erl_error
+        ],
+        "DATATYPES" => [binary, maps, lists, math],
+        "CODE" => [
+          erl_scan,
+          erl_pp,
+          erl_parse,
+          erl_lint,
+          erl_internal,
+          erl_id_trans,
+          ms_transform,
+          erl_features,
+          erl_expand_records,
+          erl_eval,
+          erl_anno,
+          epp,
+          beam_lib
+        ],
+        "DATA STRUCTURES" =>[
+          array,
+          dict,
+          digraph,
+          digraph_utils,
+          gb_sets,
+          gb_trees,
+          json,
+          orddict,
+          ordsets,
+          proplists,
+          queue,
+          sets,
+          sofs,
+          ets,
+          dets,
+          qlc
+        ],
+        "ALGORITHMS" => [rand, random, zip, erl_tar],
+        "DATE & TIME"=> [calendar, timer],
+        "NODES" => [slave, peer, argparse, escript, win32reg]
+      },
+      case [Group || Group <-maps:keys(Groups), lists:member(Mod, maps:get(Group, Groups))] of
+        [Group] -> Group;
+        [] -> "Ungrouped modules"
+      end.
+
+%expand_module_name("",_) ->
+%    {no, [], []};
 expand_module_name(Prefix,CC) ->
     Alts = [{list_to_atom(M),""} || {M,_,_} <- code:all_available()],
-    case match(Prefix, Alts, CC) of
+    ModDocs = [begin
+        case code:get_doc(Mod) of
+            {ok, #docs_v1{module_doc=ModDoc}} -> ModDoc;
+            _ -> ModDoc=none
+        end,
+        _Doc = case ModDoc of
+            hidden -> <<"Undocumented">>;
+            none -> <<"Undocumented">>;
+        #{"en" := D} -> string:sub_string(D, 0, string:str(D, "\n"));
+            #{}=M when size(M) == 0 -> <<"Undocumented">>;
+            _ -> <<"No english documentation">>
+        end,
+        Group = groups_for_modules(Mod),
+        {Group, Alt} %{Mod, ""}" - " ++ binary_to_list(Doc)
+    end || {Mod,_}=Alt <- Alts],
+    Groups = maps:groups_from_list(fun(X) -> element(1, X) end, ModDocs),
+    fold_results([case match(Prefix, maps:get(Group, Groups), CC) of
         {_Res,_Expansion,[]}=M -> M;
-        {Res,Expansion, Matches} -> {Res,Expansion,[#{title=>"modules", elems=>Matches, options=>[highlight_all]}]}
-    end.
+        {Res,Expansion, Matches} -> {Res,Expansion,[#{title=>Group, elems=>Matches, options=>[highlight_all]}]}
+    end || Group <- maps:keys(Groups)]).
 
 get_arities("shell_default"=ModStr, FuncStr, FT) ->
     {ok, Func} = to_atom(FuncStr),
@@ -953,20 +1041,23 @@ expand_name(ModStr, Type, Prefix, CompleteChar, FT) ->
                         Groups = #{ShellDefaultStr=>[{Name, Arity}||{{Type1, {_, Name, Arity}}, _} <- FT, Type1 =:= Type]};
                 false ->
                     TypeStr = pp(atom_to_list(Type)++"s"),
+                    UndocumentedStr = "Undocumented "++TypeStr,
                     case code:get_doc(Mod) of
                         {ok, #docs_v1{ docs = Docs } } ->
                             case Type of
                                 function ->
                                     Exports = get_exports(Mod),
+                                    Undocumented = [{UndocumentedStr,{Name,Arity}} || {{Type1,Name,Arity},_,_,D,_}<-Docs, Type1 =:= Type, lists:member({Name,Arity},Exports), lists:member(D, [hidden, none])],
                                     Grouped = [{pp(G),{Name,Arity}} || {{Type1,Name,Arity},_,_,_,#{group := G}}<-Docs, Type1 =:= Type, lists:member({Name,Arity},Exports)],
-                                    Ungrouped = [{TypeStr,{Name,Arity}} || {{Type1,Name,Arity},_,_,_,MD}<-Docs, Type1 =:= Type, maps:is_key(group, MD) =:= false, lists:member({Name,Arity},Exports)];
+                                    Ungrouped = [{TypeStr,{Name,Arity}} || {{Type1,Name,Arity},_,_,D,MD}<-Docs, Type1 =:= Type, maps:is_key(group, MD) =:= false, not lists:member(D, [hidden, none]), lists:member({Name,Arity},Exports)];
                                 type ->
-                                    Grouped = [{pp(G),{Name,Arity}} || {{Type1,Name,Arity},_,_,_,#{exported := true, group := G}}<-Docs, Type1 =:= Type, lists ],
-                                    Ungrouped = [{TypeStr,{Name,Arity}} || {{Type1,Name,Arity},_,_,_,#{exported := true}=MD}<-Docs, Type1 =:= Type, maps:is_key(group, MD) =:= false]
+                                    Undocumented = [{UndocumentedStr,{Name,Arity}} || {{Type1,Name,Arity},_,_,hidden,#{exported := true}}<-Docs, Type1 =:= Type],
+                                    Grouped = [{pp(G),{Name,Arity}} || {{Type1,Name,Arity},_,_,_,#{exported := true, group := G}}<-Docs, Type1 =:= Type],
+                                    Ungrouped = [{TypeStr,{Name,Arity}} || {{Type1,Name,Arity},_,_,D,#{exported := true}=MD}<-Docs, Type1 =:= Type, D =/= hidden, maps:is_key(group, MD) =:= false]
                             end,
                             Groups = maps:groups_from_list(fun (T)->element(1,T) end,
                                                         fun(T)->element(2,T) end,
-                                                        Grouped ++ Ungrouped);
+                                                        Grouped ++ Ungrouped++ Undocumented);
                         _ when Type =:= function ->
                             Groups = #{TypeStr => get_exports(Mod)};
                         _ -> %% No docs?
