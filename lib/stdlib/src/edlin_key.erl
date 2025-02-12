@@ -181,6 +181,31 @@ key_map() -> #{
             "\t" => tab_expand_full,
             default => tab_expand_quit %% go to normal mode and evaluate key input again
         },
+        %% tab_expand_full_state = #{title, suggestion_no, sort=[by title, by frequency]}
+        tab_expand_full => #{
+            %% # Arrow keys
+            %% ## Up
+            "\^[OA" => prev_title,
+            "\^[[A" => prev_title,
+
+            %% ## Down
+            "\^[OB" => next_title,
+            "\^[[B" => next_title,
+
+            %% ## Left
+            "\^[OD" => prev_suggestion,
+            "\^[[D" => prev_suggestion,
+
+            %% ## Right
+            "\^[OC" => next_suggestion,
+            "\^[[C" => next_suggestion,
+
+            "\^[[6~" => scroll_expand_down,
+            "\^[[5~" => scroll_expand_up,
+            "\t" => next_suggestion,
+            "\^[[Z" => prev_suggestion,
+            default => tab_expand_quit %% go to normal mode and evaluate key input again
+        },
         help => #{
             "\^[OA" => move_expand_up,
             "\^[[A" => move_expand_up,
