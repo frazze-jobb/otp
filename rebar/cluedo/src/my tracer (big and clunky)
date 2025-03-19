@@ -1,0 +1,27 @@
+my tracer (big and clunky)
+
+When a call trace message is received, check the pid, spawn a process that will be the tracer of this particular trace id
+        <datetime_tracer_start>_<node>_<pid>_<tracesession>_<seqno>.trace
+        store the call in the state in a stack
+when a call trace message is received again, and the pid is already dealt with since before, send the trace message to the pid tracer
+when a call return trace message is received, pop the stack, (tail calls are eliminated when using return trace)
+ write: message = functioncall(args),
+when a send message trace is received, write it as a <pid> ! message, %% link to .trace file of the pid (if it exists) %% time stamp
+when a receive message is received, write it as a receive message -> _ end, %% link to .trace file who sent the message to this pid at about the same time stamp
+when a spawn/link message is received...?
+when a scheduler event is received...?
+when a gc event is received...?
+
+how do represent functions that work perpetually like a server?
+  -they will populate the stackframes, and the tracer stack and never return, will cause crash after a while
+  can we somehow analyze a function and assume that it will never return, and disable return trace in those cases?
+  ideas:
+      if the state in the function does not change overtime, specifically "being reduced", its probably a perpetually run function...
+      functions can together be a perpetual machine: a -> b -> c -> d -> a
+      this kind of function typically run, wait for a message, run, wait for a message, often updating some intenal state,
+        we want to output the state change to know whats going on.
+      when we detect a perpetual function, we want to disable return trace for the function, we also want to directly output the call and state, and not wait
+        for a return, a pass over the output trace can be made later that compresses state to a state variable and state change
+how to select which functions to trace?
+  we probably want to have stdlib visible, at least data structures, but we only want to have the entry and the return, and not the intermediate steps
+  this will however generate a lot of trace messages...

@@ -1,0 +1,3 @@
+minimal tracer
+
+just output trace messages as json, use vscode to visualize and use folding
