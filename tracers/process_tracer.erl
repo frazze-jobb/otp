@@ -1,39 +1,45 @@
--module(process_tracer).
+-module(process_tracer). %% TODO: this should be a post processing step instead
 -behaviour(gen_server).
 
 %% API
--export([start_link/2, trace/2]).
+-export([start_link/3, trace/2]).
 %% gen_server callbacks
 -export([init/1, handle_cast/2, handle_info/2, handle_call/3, terminate/2, code_change/3]).
 
 -record(state, {
     pid,         %% The traced process' PID
     file,        %% File handle for output
+    line = 0,        %% The current line in the file
     dir,
+        process_info,
     call_stack = [] %% Stack to accumulate nested call events
 }).
 -define(UNDEF, <<"undefined">>).
+
+
+
 %%% API Functions
 
 %% Starts a ProcessTracer for a given traced process (Pid)
-start_link(TracedPid, Dir) ->
-    gen_server:start_link(?MODULE, [TracedPid, Dir], []).
+start_link(TracedPid, Dir, ProcessInfo) ->
+    gen_server:start_link(?MODULE, [TracedPid, Dir, ProcessInfo], []).
 
 trace(ProcessTracer, Message) ->
         gen_server:cast(ProcessTracer, Message).
 %%% gen_server Callbacks
 
-init([TracedPid, Dir]) ->
+init([TracedPid, Dir, ProcessInfo]) ->
     %% Convert Pid to a filename-friendly string and open a trace file (in append mode)
     FileName = filename:join([Dir, pid_to_filename(TracedPid) ++ ".trace"]),
     {ok, File} = file:open(FileName, [append]),
-    {ok, #state{pid = TracedPid, file = File, dir = Dir}}.
+    {ok, #state{pid = TracedPid, file = File, dir = filename:absname(Dir), process_info=ProcessInfo}}.
 
-handle_cast({trace, Msg}, State) ->
+handle_cast({trace, Msg}, #state{line = Line} = State) ->
     %% Process and translate the trace message to JSON-like format.
     {NewState, JsonStr} = process_trace(Msg, State),
+    Line1 = Line + length(string:split(JsonStr, "\n", all))-1,
     file:write(State#state.file, JsonStr),
-    {noreply, NewState};
+    {noreply, NewState#state{line = Line1}};
 handle_cast(stop, State) ->
         {NewState, JsonStr} = process_trace(stop,State),
         file:write(State#state.file, JsonStr),
@@ -60,13 +66,23 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% pid_to_filename/1
 %% Converts an Erlang PID into a string suitable for a filename.
-pid_to_filename(Pid) ->
+pid_to_filename(Pid) when is_atom(Pid) ->
+        PidStr = case whereis(Pid) of
+                undefined -> <<"undefined">>;
+                ActualPid when is_pid(ActualPid) -> erlang:pid_to_list(ActualPid)
+        end,
+        CleanStr = string:replace(PidStr, "<", "", all),
+        string:replace(CleanStr, ">", "", all);
+    
+
+pid_to_filename(Pid) when is_pid(Pid) ->
     PidStr = erlang:pid_to_list(Pid),
     CleanStr = string:replace(PidStr, "<", "", all),
     string:replace(CleanStr, ">", "", all).
 
 we2bin(P)->
         list_to_binary(io_lib:format("~p",[P])).
+
 %% process_trace/2
 process_trace(stop, State) ->
         #state{call_stack = CallStack} = State,
@@ -75,34 +91,42 @@ process_trace(stop, State) ->
         Json = list_to_binary(Close),
         {State#state{call_stack = []}, Json};
 %% Pattern-matches on the incoming trace message and returns an updated state plus a JSON string.
-process_trace({trace, _Pid, send, Msg, To}, #state{dir = Dir, call_stack = [#{body:=Body} = CallEvent| CallStack]} = State) ->
+process_trace({trace, _Pid, send, Msg, To}, #state{line = Line, dir = Dir, call_stack = CallStack} = State) ->
     %% Send messages: include a link to the PID-specific trace file.
-    %% TODO: Add a timestamp, send this to a message_handler process who receivers can call to get the sender
-    Send = #{send => we2bin(To), message => we2bin(Msg), link => [we2bin(Dir),we2bin(To)]},
-    CallEvent1 = CallEvent#{body := [Send | Body]},
-    Json = json:encode(Send),
-    {State#state{call_stack = [CallEvent1 | CallStack]}, Json};
+    message_tracer:create_sender_link({trace, _Pid, send, Msg, To}, Line),
+    Link = list_to_binary("file://" ++Dir++"/"++ pid_to_filename(To) ++ ".trace"), %% We can't put a line number, the receive has not happened yet
+    Send = #{send => we2bin(To), message => we2bin(Msg), link => Link},
+    #{send := Receiver, message := Message, link := Link1} = Send,
+    Indent = "\n"++string:copies("  ",length(State#state.call_stack)*2),
+    Json = list_to_binary(io_lib:format("~s{\"send\": \"~p\",~s  \"message\": \"~p\",~s  \"link\": \"~s\"},",
+    [Indent, To, Indent, Msg, Indent, Link1])),
+    {State#state{call_stack = CallStack}, Json};
 
-process_trace({trace, _Pid, send_to_non_existing_process, Msg, To}, #state{call_stack = [#{body:=Body} = CallEvent| CallStack]} = State) ->
+process_trace({trace, _Pid, send_to_non_existing_process, Msg, To}, #state{call_stack = CallStack} = State) ->
     %% Send to non-existing process messages.
     Send = #{send => we2bin(To), message => we2bin(Msg), link => ?UNDEF},
-      CallEvent1 = CallEvent#{body := [Send | Body]},
-      Json = json:encode(Send),
-      {State#state{call_stack = [CallEvent1 | CallStack]}, Json};
+    #{send := Receiver, message := Message, link := Link1} = Send,
+    Indent = "\n"++string:copies("  ",length(State#state.call_stack)*2),
+    Json = list_to_binary(io_lib:format("~s{\"send\": \"~p\",~s  \"message\": \"~p\",~s  \"link\": \"~s\"},",
+    [Indent, To, Indent, Msg, Indent, Link1])),
+      {State#state{call_stack = CallStack}, Json};
 
-process_trace({trace, _Pid, 'receive', Msg}, #state{call_stack = []} = State) ->
-        Recv = #{'receive' => ?UNDEF, message => we2bin(Msg), link => ?UNDEF},
-        Json = json:encode(Recv),
-        {State, Json};
-process_trace({trace, _Pid, 'receive', Msg}, #state{call_stack = [#{body:=Body} = CallEvent| CallStack]} = State) ->
-    %% Receive messages: include a comment about linking back to sender's trace.
-    %% TODO: Should be possible to ask other process_tracers who sent this
-    %%  id:ing it using the pid, message, and a timestamp?
-    Recv = #{'receive' => ?UNDEF, message => we2bin(Msg), link => ?UNDEF},
-    CallEvent1 = CallEvent#{body := [Recv| Body]},
-    Json = json:encode(Recv),
-    {State#state{call_stack = [CallEvent1 | CallStack]}, Json};
+process_trace({trace, _Pid, 'receive', Msg}, #state{dir = Dir, call_stack = CallStack} = State) ->
+    %% Receive messages: include a link back to sender's trace.
+    case message_tracer:get_sender_link({trace, _Pid, 'receive', Msg}) of
+        {unknown, undefined} -> Recv = #{'receive' => we2bin(unknown), message => we2bin(Msg), link => ?UNDEF};
+        {SenderPid, Line} -> Link = list_to_binary("file://" ++ Dir ++ "/" ++ pid_to_filename(SenderPid) ++ ".trace#" ++ integer_to_list(Line)),
+                Recv = #{'receive' => we2bin(SenderPid), message => we2bin(Msg), link => Link}
+    end,
+    #{'receive' := Sender, message := Message, link := Link1} = Recv,
+    Indent = "\n"++string:copies("  ",length(State#state.call_stack)*2),
+    Json = list_to_binary(io_lib:format("~s{\"receive\": \"~s\",~s  \"message\": \"~p\",~s  \"link\": \"~s\"},",
+        [Indent, Sender, Indent, Msg, Indent, Link1])),
+    {State#state{call_stack = CallStack}, Json};
 
+
+process_trace({trace, _Pid, call, {M, F, Args}}, State) ->
+        process_trace({trace, _Pid, call, {M, F, Args}, undefined}, State);
 process_trace({trace, _Pid, call, {M, F, Args}, Caller}, State) ->
     %% TODO: detect in the call stack if this m:f/a == earlier m:f/a, its probably an idefinite loop
     %% -> take the session and call trace:function(sesssion, {m,f,a}, {'_', [], [{message, caller_line}]})
@@ -110,7 +134,6 @@ process_trace({trace, _Pid, call, {M, F, Args}, Caller}, State) ->
     MFA = {M,F,A} = {M, F, length(Args)},
     CallEvent = #{call => MFA,
                   args => Args,
-                  body => [],
                   caller => Caller,
                   return => undefined},
     Indent = "\n"++string:copies("  ",length(State#state.call_stack)*2),
@@ -120,7 +143,7 @@ process_trace({trace, _Pid, call, {M, F, Args}, Caller}, State) ->
         {M1, _, _, {_, Line}} -> 
                 case proplists:get_value(source, M1:module_info(compile), undefined) of
                         undefined -> ?UNDEF;
-                        File -> we2bin("file://" ++ File ++ "#" ++ integer_to_list(Line))
+                        File -> list_to_binary("file://" ++ File ++ "#" ++ integer_to_list(Line))
                 end;
         {M1, _, _, undefined} -> 
                 case code:which(M1) of
@@ -132,15 +155,14 @@ process_trace({trace, _Pid, call, {M, F, Args}, Caller}, State) ->
                                 end,
                                 case FileLine of
                                         {undefined, undefined} -> ?UNDEF;
-                                        {File1, Line1} -> we2bin("file://" ++ File1 ++ "#" ++ integer_to_list(Line1))
+                                        {File1, Line1} -> list_to_binary("file://" ++ File1 ++ "#" ++ integer_to_list(Line1))
                                 end;
-                        preloaded -> we2bin("preloaded")
+                        preloaded -> we2bin(preloaded)
                 end;
         undefined -> ?UNDEF
     end,
     %% Output half completed json
-    io_lib:format("~p",[Args]),
-    Json = list_to_binary(io_lib:format("~s{\"call\": \"~p:~p/~p\",~s  \"args\": ~p,~s  \"file\": ~s,~s  \"body\": [",
+    Json = list_to_binary(io_lib:format("~s{\"call\": \"~p:~p/~p\",~s  \"args\": \"~p\",~s  \"file\": \"~s\",~s  \"body\": [",
       [Indent, M,F,A, Indent, Args, Indent, Caller1, Indent])),
     {NewState, Json};
 
@@ -172,12 +194,12 @@ process_trace({trace, _Pid, return_from, {M, F, Arity}, ReturnValue}, State) ->
             %CompletedCall = CallEvent#{return => ReturnValue},
             NewState = State#state{call_stack = Rest},
             Indent = "\n"++string:copies("  ",length(Rest)*2),
-            Json = list_to_binary(io_lib:format("~s  ],~s  \"return\": \"~p\"~s}",[Indent, Indent, ReturnValue, Indent])),
+            Json = list_to_binary(io_lib:format("~s  ],~s  \"return\": \"~p\"~s},",[Indent, Indent, ReturnValue, Indent])),
             {NewState,Json};
         [] ->
             %% No active call event: log as a standalone return_from.
             Json = io_lib:format(
-              "\n{\"return_from\":\"~p\",\n  \"value\":\"~p\"}",
+              "\n{\"return_from\":\"~p\",\n  \"value\":\"~p\"},",
               [{M, F, Arity}, ReturnValue]),
             {State, lists:flatten(Json)}
     end;

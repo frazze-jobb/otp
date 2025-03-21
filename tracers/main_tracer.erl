@@ -11,6 +11,7 @@
 -record(state, {
     session,
     dir,
+    mode = pass1,
     tracers = #{}
 }).
 %% TODO 
@@ -40,13 +41,14 @@ trace(Msg) ->
 %%% gen_server Callbacks
 
 init(_Args) ->
+    message_tracer:start_link(),
     Tracer = spawn(fun F() -> receive M -> trace(M), F() end end),
     Session = trace:session_create(?MODULE, Tracer, []),
     Timestamp = erlang:system_time(millisecond),
         DirName = io_lib:format("main_tracer/~p", [Timestamp]),
         file:make_dir("main_tracer/"),
         ok = file:make_dir(DirName),
-        {ok, #state{session = Session, dir = DirName}}.
+        {ok, #state{session = Session, dir = filename:absname(DirName), mode = pass1}}.
 
 handle_call(get_session, _From, State) ->
         {reply, State#state.session, State};
@@ -57,20 +59,55 @@ handle_call(stop, _From, State) ->
         {stop, normal, State};
 handle_call(_Request, _From, State) ->
         {reply, ok, State}.
+
+
+pid_to_filename(Pid) when is_atom(Pid) ->
+        PidStr = case whereis(Pid) of
+                undefined -> <<"undefined">>;
+                ActualPid when is_pid(ActualPid) -> erlang:pid_to_list(ActualPid)
+        end,
+        CleanStr = string:replace(PidStr, "<", "", all),
+        string:replace(CleanStr, ">", "", all);
         
-handle_cast({trace_msg, Msg}, State) ->
+
+pid_to_filename(Pid) when is_pid(Pid) ->
+        PidStr = erlang:pid_to_list(Pid),
+        CleanStr = string:replace(PidStr, "<", "", all),
+        string:replace(CleanStr, ">", "", all).
+
+
+handle_cast({trace_msg, Msg}, #state{mode = pass1, dir = Dir} = State) ->
+        Pid = element(2, Msg),
+        Tracers = State#state.tracers,
+        case maps:get(Pid, Tracers, undefined) of
+                undefined ->
+                        %% TODO: if a new process appears but with the same pid as an old process that has exited, then we
+                        %% should get the process info and add a number to the pid {Pid, 1} to be able to distinguish it from the old process
+                        %% send will be a little bit trickier, since we need to keep track when the send was made in relation to the
+                        %% exit and start of the new process. During the first pass, we are able to make this distinction, and should tag the send
+                        %% with the correct TO pid,
+                        FileName = filename:join([Dir, pid_to_filename(Pid) ++ ".trace"]),
+                        {ok, File} = file:open(FileName, [append]),
+                        Term = {Pid, process_info(Pid)},
+                        file:write_file(filename:join([Dir, "process_info"], term_to_binary(Term)), [append]),
+                        file:write(File, term_to_binary(Msg)),
+                        {noreply, State#state{tracers = Tracers#{Pid => File}}};
+                File ->
+                        %% TODO: if we have received an exit trace, we should stop the ProcessTracer
+                        %% and remove it from the tracers map
+                        file:write(File, term_to_binary(Msg)),
+                        {noreply, State}
+        end;
+handle_cast({trace_msg, Msg}, #state{mode = postprocess} = State) ->
     %% Look up if a ProcessTracer already exists for Pid
     Pid = element(2, Msg),
-    case element(3, Msg) of
-        MPOP when MPOP =:= send; MPOP =:= send_to_non_existing_process, MPOP =:= 'receive' ->
-                %% TODO: send to a message passing tracing process
-                ok;
-        _ -> ok
-    end,
     Tracers = State#state.tracers,
     case maps:get(Pid, Tracers, undefined) of
         undefined ->
             %% No ProcessTracer exists; spawn a new one
+            %% TODO: process_tracer should be a postprocessing step, instead we should start a separate
+            %% tracer? or just output to a separate file, keep track on call chain
+            %% disable {return_trace} for this pid on this specific call,
             {ok, ProcTracerPid} = process_tracer:start_link(Pid, State#state.dir),
             NewTracers = Tracers#{Pid => ProcTracerPid},
             %% Forward current trace message to the new ProcessTracer
