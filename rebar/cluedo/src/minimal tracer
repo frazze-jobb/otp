@@ -1,3 +1,65 @@
 minimal tracer
 
 just output trace messages as json, use vscode to visualize and use folding
+
+I have something that works now, I do not support all trace messages, I could add those
+I should have a message queue handler process, this should take all sends as they happen and write to a file.
+Instead of writing a particular big arg several times to a trace file, store it in a variable X0, {'var':X0, 'value': BigArg}, replace the big arg
+with X0. args: [1, [], #record{...}/#{...}/[first,...]/{first,...} = X0]
+Post processing steps:
+ - when we get a receive trace, we should look inside the message queue file and match against the msg payload, take the first and remove it
+  (maybe not 100% solid, but 99%?) and write a link to the pid.trace file
+ - rewrite the 'var' names to something that corresponds to the function parameter 'var' name, display keys that are matched in function head
+ - when we have written 10000 lines to a file, we should jump to a new file,
+ - we have file and line in some cases, but we should do a postprocessing step for this
+Code traverser erlang module or vscode rr debugger server plugin:
+ - Get the code using file:line and output a debug ui, highlight the current active function, display the return value
+ - Support stepping and stepping over and reverse stepping (first), then support break points, watch points,
+ - 
+
+Help me formulate the description of this project.
+The project is a module that provides a tracer (MainTracer) that upon receiving a trace message from a certain process,
+creates a new tracing process (ProcessTracer) and forwards the message to the ProcessTracer. For every process in the
+system there may potentially be a ProcessTracer associated with it. When a ProcessTracer is created, it creates a file
+named after the PID of the process
+("PID.trace") to output trace messages into. The trace messages are processed and translated before they
+are oututted to the file. The subsequent trace messages from the same process will be forwarded to the ProcessTracer,
+the MainTracer has a table to lookup which ProcessTracer is associated with a certain PID.
+The Trace message types that can come are the following:
+{trace, Pid, send, Msg, To} - When process Pid sends message Msg to process To.
+This messages should be converted to the following json: {"send":"To", "message":"Msg"} and a comment with a link to file:///path/to/PID.trace
+{trace, Pid, send_to_non_existing_process, Msg, To} - When process Pid sends message Msg to the non-existing process To.
+This message should be translated to {"send":"To", "message":"Msg"} and a comment stating that this process does not exist
+{trace, Pid, 'receive', Msg} - When process Pid receives message Msg. If Msg is set to time-out, a receive statement can have timed out, or the process received a message with the payload timeout.
+Should be translated to {"receive":"Msg"} with a comment with a link to the process that send this message
+{trace, Pid, call, {M, F, Args}} - When process Pid calls a traced function. The return values of calls are never supplied, only the call and its arguments.
+Should be translated to {"call":"M:F/length(Args)", "args":Args, "body":[...], "return":...} Where body will be populated with translated trace messages, up until a return_from trace is received.
+If the call happens to be a indefinite loop, return_from traces have to be disabled for that function. "return" will in this case not be populated.
+
+{trace, Pid, return_to, {M, F, Arity}} - When process Pid returns to the specified function. This trace message is sent if both the flags call and return_to are set, and the function is set to be traced on local function calls. The message is only sent when returning from a chain of tail recursive function calls, where at least one call generated a call trace message (that is, the functions match specification matched, and {message, false} was not an action).
+
+
+{trace, Pid, return_from, {M, F, Arity}, ReturnValue} - When Pid returns from the specified function. This trace message is sent if flag call is set, and the function has a match specification with a return_trace or exception_trace action.
+translate to {"value":ReturnValue}
+{trace, Pid, exception_from, {M, F, Arity}, {Class, Value}} - When Pid exits from the specified function because of an exception. This trace message is sent if flag call is set, and the function has a match specification with an exception_trace action.
+translate to {"exception":{Class, Value}}
+{trace, Pid, spawn, Pid2, {M, F, Args}} - When Pid spawns a new process Pid2 with the specified function call as entry point.
+Args is supposed to be the argument list, but can be any term if the spawn is erroneous.
+translate to {"spawn":Pid2, "fun":{M:F/length(Args), "args":Args}} with a comment with a link to where the trace file for Pid2 is
+{trace, Pid, spawned, Pid2, {M, F, Args}} - When Pid is spawned by process Pid2 with the specified function call as entry point.
+Args is supposed to be the argument list, but can be any term if the spawn is erroneous.
+translate to {"spawned":Pid2, "fun":{M:F/length(Args), "args":Args}} with a comment with a link to where the trace file for Pid2 is
+{trace, Pid, exit, Reason} - When Pid exits with reason Reason.
+translate to {"exit":Reason}
+{trace, Pid, register, RegName} - When process Pid gets the name RegName registered.
+translate to {"register": RegName}, a symbolic link should be created RegName_PID.trace
+{trace, Pid, unregister, RegName} - When process Pid gets the name RegName unregistered. This is done automatically when a registered process or port exits.
+translate to {"unregister", RegName}
+
+{trace, Pid, link, Pid2} - When Pid links to a process Pid2.
+
+{trace, Pid, unlink, Pid2} - When Pid removes the link from a process Pid2.
+
+{trace, Pid, getting_linked, Pid2} - When Pid gets linked to a process Pid2.
+
+{trace, Pid, getting_unlinked, Pid2} - When Pid gets unlinked from a process Pid2.

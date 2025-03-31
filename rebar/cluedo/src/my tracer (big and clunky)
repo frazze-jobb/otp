@@ -10,7 +10,9 @@ when a send message trace is received, write it as a <pid> ! message, %% link to
 when a receive message is received, write it as a receive message -> _ end, %% link to .trace file who sent the message to this pid at about the same time stamp
 when a spawn/link message is received...?
 when a scheduler event is received...?
+when a register event is received..?
 when a gc event is received...?
+when a port trace message is received?
 
 how do represent functions that work perpetually like a server?
   -they will populate the stackframes, and the tracer stack and never return, will cause crash after a while

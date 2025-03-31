@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, start_link/1, trace/1, trace_session/1]).
+-export([start_link/0, start_link/1, trace/1, trace_session/1, stop/1]).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -30,7 +30,8 @@ start_link(Opts) ->
 
 trace_session(Pid) ->
     gen_server:call(Pid, get_session).
-
+stop(Pid) ->
+    gen_server:call(Pid, stop).
 
 
 
@@ -48,6 +49,7 @@ init(_Args) ->
         DirName = io_lib:format("main_tracer/~p", [Timestamp]),
         file:make_dir("main_tracer/"),
         ok = file:make_dir(DirName),
+        os:cmd("ln -snf "++ filename:absname(DirName) ++ " " ++ filename:absname("main_tracer/latest")),
         {ok, #state{session = Session, dir = filename:absname(DirName), mode = pass1}}.
 
 handle_call(get_session, _From, State) ->
@@ -87,14 +89,19 @@ handle_cast({trace_msg, Msg}, #state{mode = pass1, dir = Dir} = State) ->
                         %% exit and start of the new process. During the first pass, we are able to make this distinction, and should tag the send
                         %% with the correct TO pid,
                         FileName = filename:join([Dir, pid_to_filename(Pid) ++ ".trace"]),
-                        {ok, File} = file:open(FileName, [append]),
+                        {ok, File} = file:open(FileName, [append, binary]),
                         Term = {Pid, process_info(Pid)},
-                        file:write_file(filename:join([Dir, "process_info"], term_to_binary(Term)), [append]),
+                        file:write_file(filename:join([Dir, "process_info"]), term_to_binary(Term), [append, binary]),
                         file:write(File, term_to_binary(Msg)),
                         {noreply, State#state{tracers = Tracers#{Pid => File}}};
                 File ->
+                        %% TODO: how can we make the second step aware on which line a receive happens?
+                        %%   we dont have json here, so line number is not valuable. We can have the 
+                        %%   post processing step upon handling the receive trace, wait until the corresponding
+                        %%   send happens and vice versa. Not sure if this can cause deadlocks, or make the postprocessing mostly sequential?
                         %% TODO: if we have received an exit trace, we should stop the ProcessTracer
-                        %% and remove it from the tracers map
+                        %%   and remove it from the tracers map, currently the process_tracer stops itself, but the gen server is still
+                        %%   alive.
                         file:write(File, term_to_binary(Msg)),
                         {noreply, State}
         end;
