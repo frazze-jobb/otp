@@ -1,0 +1,14 @@
+{application, trace_reader, [
+    {description, "An Erlang trace file reader and debugger"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {trace_reader_app, []}},
+    {applications, [
+        kernel,
+        stdlib
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+ ]}.
