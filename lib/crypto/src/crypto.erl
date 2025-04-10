@@ -2869,6 +2869,9 @@ generate_key(eddh, Curve, PrivKey) when Curve == x448 ;
               [eddh, Curve, PrivKey]
              );
 
+generate_key(ecdh, Curve, {PrivKey, Format}) ->
+    ?nif_call(ec_generate_key_nif(nif_curve_params(Curve), {ensure_int_as_bin(PrivKey),Format}));
+
 generate_key(ecdh, Curve, PrivKey) ->
     ?nif_call(ec_generate_key_nif(nif_curve_params(Curve), ensure_int_as_bin(PrivKey)));
 
