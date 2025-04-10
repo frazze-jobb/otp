@@ -40,6 +40,8 @@ extern ERL_NIF_TERM atom_rsa_pkcs1_oaep_padding;
 extern ERL_NIF_TERM atom_rsa_no_padding;
 extern ERL_NIF_TERM atom_signature_md;
 extern ERL_NIF_TERM atom_undefined;
+extern ERL_NIF_TERM atom_uncompressed;
+extern ERL_NIF_TERM atom_compressed;
 
 extern ERL_NIF_TERM atom_hmac;
 extern ERL_NIF_TERM atom_cmac;

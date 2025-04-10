@@ -36,6 +36,8 @@ ERL_NIF_TERM atom_rsa_pkcs1_oaep_padding;
 ERL_NIF_TERM atom_rsa_no_padding;
 ERL_NIF_TERM atom_signature_md;
 ERL_NIF_TERM atom_undefined;
+ERL_NIF_TERM atom_uncompressed;
+ERL_NIF_TERM atom_compressed;
 
 ERL_NIF_TERM atom_hmac;
 ERL_NIF_TERM atom_cmac;
@@ -167,6 +169,8 @@ int init_atoms(ErlNifEnv *env) {
     atom_rsa_no_padding = enif_make_atom(env,"rsa_no_padding");
     atom_signature_md = enif_make_atom(env,"signature_md");
     atom_undefined = enif_make_atom(env,"undefined");
+    atom_uncompressed = enif_make_atom(env,"uncompressed");
+    atom_compressed = enif_make_atom(env,"compressed");
 
     atom_hmac = enif_make_atom(env,"hmac");
     atom_cmac = enif_make_atom(env,"cmac");
