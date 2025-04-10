@@ -43,7 +43,6 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
     int arity = -1;
     const ERL_NIF_TERM* curve_tuple;
 
-
     /* Here are two random curve definition examples, one prime_field and
        one characteristic_two_field. Both are from the crypto/src/crypto_ec_curves.erl.
 
@@ -88,7 +87,7 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
         && enif_get_atom(env, curve_tuple[1], gcd->curve_name,
                          sizeof(gcd->curve_name), ERL_NIF_LATIN1)) {
         ErlNifBinary order_bin;
-        params[(*i)++] = OSSL_PARAM_construct_utf8_string("group", gcd->curve_name, 0);
+        params[(*i)++] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, gcd->curve_name, 0);
 
         if (order_size) {
             if (!enif_inspect_binary(env, curve[3], &order_bin))
@@ -100,30 +99,30 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
     }
     gcd->use_curve_name = 0;
 
-    if (!get_ossl_octet_string_param_from_bin(env, "generator", curve[2], &params[(*i)++]))
+    if (!get_ossl_octet_string_param_from_bin(env, OSSL_PKEY_PARAM_EC_GENERATOR, curve[2], &params[(*i)++]))
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad Generator (Point)"));
 
-    if (!get_ossl_BN_param_from_bin_sz(env, "order", curve[3], &params[(*i)++], order_size))
+    if (!get_ossl_BN_param_from_bin_sz(env, OSSL_PKEY_PARAM_EC_ORDER, curve[3], &params[(*i)++], order_size))
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad order"));
 
     if (curve[4] == atom_none)
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Cofactor must be != none"));
-                
-    if (!get_ossl_BN_param_from_bin(env, "cofactor", curve[4], &params[(*i)++]))
+
+    if (!get_ossl_BN_param_from_bin(env, OSSL_PKEY_PARAM_EC_COFACTOR, curve[4], &params[(*i)++]))
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad cofactor"));
 
     /* {A, B, Seed} = Prime = curve[1] */
     if (!enif_get_tuple(env, curve[1], &p_arity, &prime))
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad Prime"));
 
-    if (!get_ossl_BN_param_from_bin(env, "a", prime[0], &params[(*i)++]))
+    if (!get_ossl_BN_param_from_bin(env, OSSL_PKEY_PARAM_EC_A, prime[0], &params[(*i)++]))
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad a"));
 
-    if (!get_ossl_BN_param_from_bin(env, "b", prime[1], &params[(*i)++]))
+    if (!get_ossl_BN_param_from_bin(env, OSSL_PKEY_PARAM_EC_B, prime[1], &params[(*i)++]))
         assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad b"));
 
     if (enif_is_binary(env, prime[2]))
-        if (!get_ossl_octet_string_param_from_bin(env, "seed", prime[2], &params[(*i)++]))
+        if (!get_ossl_octet_string_param_from_bin(env, OSSL_PKEY_PARAM_EC_SEED, prime[2], &params[(*i)++]))
             assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad seed"));
 
     /* Field = curve[0] */
@@ -132,9 +131,9 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
     }
     else if (f_arity == 2 && field[0] == atom_prime_field) {
         /* {prime_field, Prime} */
-        params[(*i)++] = OSSL_PARAM_construct_utf8_string("field-type",  "prime-field", 0);
-                
-        if (!get_ossl_BN_param_from_bin(env, "p", field[1], &params[(*i)++]))
+        params[(*i)++] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_EC_FIELD_TYPE,  "prime-field", 0);
+
+        if (!get_ossl_BN_param_from_bin(env, OSSL_PKEY_PARAM_EC_P, field[1], &params[(*i)++]))
             assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad p (Prime)"));
     }
 
@@ -147,7 +146,7 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
         const ERL_NIF_TERM* basis;
         long field_bits;
 
-        params[(*i)++] = OSSL_PARAM_construct_utf8_string("field-type",  "characteristic-two-field", 0);
+        params[(*i)++] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_EC_FIELD_TYPE, "characteristic-two-field", 0);
 
         if ((p = BN_new()) == NULL)
             assign_goto(*ret, err, EXCP_ERROR(env, "Creating bignum failed"));
@@ -156,7 +155,7 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
             (field_bits > OPENSSL_ECC_MAX_FIELD_BITS || field_bits > INT_MAX)
             )
             assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad field-bits (M)"));
-                    
+
         if (enif_get_tuple(env, field[2], &b_arity, &basis)) {
             if (b_arity == 2) {
                 unsigned int k1;
@@ -210,16 +209,16 @@ int get_curve_definition(ErlNifEnv* env, ERL_NIF_TERM *ret, ERL_NIF_TERM def,
         } else
             assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad last field"));
 
-        if (!get_ossl_BN_param_from_bn(env, "p", p, &params[(*i)++]))
+        if (!get_ossl_BN_param_from_bn(env, OSSL_PKEY_PARAM_EC_P, p, &params[(*i)++]))
             assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "BN padding failed"));
 #  endif
     }
     else
-        assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad field-type")); 
+        assign_goto(*ret, err, EXCP_ERROR_N(env, 1, "Bad field-type"));
 
     if (p) BN_free(p);
     return 1;
-    
+
  err:
     if (p) BN_free(p);
     return 0;
@@ -234,14 +233,14 @@ int get_ec_public_key(ErlNifEnv* env, ERL_NIF_TERM key, EVP_PKEY **pkey)
     OSSL_PARAM params[15];
     struct get_curve_def_ctx gcd;
     EVP_PKEY_CTX *pctx = NULL;
-    
+
     if (!enif_get_tuple(env, key, &tpl_arity, &tpl_terms) ||
         (tpl_arity != 2) ||
         !enif_is_tuple(env, tpl_terms[0]) ||
         !enif_is_binary(env, tpl_terms[1]) )
         assign_goto(ret, err, EXCP_BADARG_N(env, 0, "Bad public key format"));
-    
-    if (!get_ossl_octet_string_param_from_bin(env, "pub",  tpl_terms[1], &params[i++]))
+
+    if (!get_ossl_octet_string_param_from_bin(env, OSSL_PKEY_PARAM_PUB_KEY,  tpl_terms[1], &params[i++]))
         assign_goto(ret, err, EXCP_BADARG_N(env, 0, "Bad public key"));
 
     if (!(pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL)))
@@ -256,7 +255,7 @@ retry_without_name:
 
     if (EVP_PKEY_fromdata_init(pctx) <= 0)
         assign_goto(ret, err, EXCP_ERROR(env, "Can't init fromdata"));
-    
+
     if (EVP_PKEY_fromdata(pctx, pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0) {
         if (gcd.use_curve_name) {
             gcd.use_curve_name = 0;
@@ -289,7 +288,7 @@ static int get_ec_private_key_2(ErlNifEnv* env,
     struct get_curve_def_ctx gcd;
     EVP_PKEY_CTX *pctx = NULL;
 
-    if (!get_ossl_BN_param_from_bin(env, "priv",  key, &params[i++]))
+    if (!get_ossl_BN_param_from_bin(env, OSSL_PKEY_PARAM_PRIV_KEY,  key, &params[i++]))
         assign_goto(*ret, err, EXCP_BADARG_N(env, 0, "Bad private key"));
 
     if (!(pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL)))
@@ -304,7 +303,7 @@ retry_without_name:
 
     if (EVP_PKEY_fromdata_init(pctx) <= 0)
         assign_goto(*ret, err, EXCP_ERROR(env, "Can't init fromdata"));
-    
+
     if (EVP_PKEY_fromdata(pctx, pkey, EVP_PKEY_KEYPAIR, params) <= 0) {
         if (gcd.use_curve_name) {
             gcd.use_curve_name = 0;
@@ -316,7 +315,7 @@ retry_without_name:
 
     if (!*pkey)
         assign_goto(*ret, err, EXCP_ERROR(env, "Couldn't get a private key"));
-    
+
     if (pctx) EVP_PKEY_CTX_free(pctx);
     return 1;
 
@@ -337,7 +336,7 @@ int get_ec_private_key(ErlNifEnv* env, ERL_NIF_TERM key, EVP_PKEY **pkey)
         !enif_is_tuple(env, tpl_terms[0]) ||
         !enif_is_binary(env, tpl_terms[1]) )
         assign_goto(ret, err, EXCP_BADARG_N(env, 0, "Bad private key format"));
-    
+
     if (!get_ec_private_key_2(env, tpl_terms[0], tpl_terms[1], pkey, &ret, NULL))
         goto err;
 
