@@ -1,6 +1,7 @@
 ```erlang
 %% Build
 c("main_tracer.erl").
+c("trace_rotator.erl").
 c("message_tracer.erl").
 c("process_tracer.erl").
 c("post_process_tracer.erl").

@@ -11,8 +11,8 @@
 -record(state, {
     session,
     dir,
-    mode = pass1,
-    tracers = #{}
+    tracer_rotator,
+    pid_callstacks = #{}
 }).
 %% TODO 
 %% - session should be unique in case we use several main_tracers
@@ -44,87 +44,90 @@ trace(Msg) ->
 init(_Args) ->
     message_tracer:start_link(),
     Tracer = spawn(fun F() -> receive M -> trace(M), F() end end),
+    TraceRotator = trace_rotator:start_link("traces", 10000),
     Session = trace:session_create(?MODULE, Tracer, []),
     Timestamp = erlang:system_time(millisecond),
-        DirName = io_lib:format("main_tracer/~p", [Timestamp]),
-        file:make_dir("main_tracer/"),
-        ok = file:make_dir(DirName),
-        os:cmd("ln -snf "++ filename:absname(DirName) ++ " " ++ filename:absname("main_tracer/latest")),
-        {ok, #state{session = Session, dir = filename:absname(DirName), mode = pass1}}.
+    DirName = io_lib:format("main_tracer/~p", [Timestamp]),
+    file:make_dir("main_tracer/"),
+    ok = file:make_dir(DirName),
+    os:cmd("ln -snf "++ filename:absname(DirName) ++ " " ++ filename:absname("main_tracer/latest")),
+    %% Any process_info or module_info after this point is tracked by reading the traces
+    file:write_file(filename:join([DirName, "process_info"]), term_to_binary(collect_active_processes()), [binary]),
+    file:write_file(filename:join([DirName, "module_info"]), term_to_binary(collect_loaded_modules()), [binary]),
+    {ok, #state{session = Session, trace_rotator = TraceRotator, dir = filename:absname(DirName), mode = pass1}}.
+
+%% @private Collects loaded module info into a list.
+collect_loaded_modules() ->
+    Loaded = code:all_loaded(),
+    lists:map(
+      fun({Module, BeamPath}) ->
+              SourcePath = get_source_path(Module),
+              #{module => Module, beam_path => BeamPath, source_path => SourcePath}
+      end, Loaded).
+
+%% @private Gets the source file path from module compile info.
+get_source_path(Module) ->
+    try
+        case Module:module_info(compile) of
+            undefined -> undefined;
+            CompileInfo ->
+                case proplists:get_value(source, CompileInfo) of
+                    undefined -> undefined;
+                    Source -> Source
+                end
+        end
+    catch
+        _:_ -> undefined
+    end.
+
+%% @private Collects active process info into a list.
+collect_active_processes() ->
+    Pids = erlang:processes(),
+    % Use foldl to build the list, skipping dead processes
+    lists:foldl(
+      fun(Pid, Acc) ->
+              try
+                  % Specify desired fields
+                  Keys = [dictionary,messages,parent,links,registered_name,current_stacktrace],
+                %[registered_name, initial_call, current_function, message_queue_len, total_heap_size, links, monitors],
+                  case erlang:process_info(Pid, Keys) of
+                      undefined -> % Process died between processes() and process_info()
+                         Acc;
+                      InfoList ->
+                         InfoMap = maps:from_list(InfoList),
+                         % Add pid itself to the map for clarity
+                         ProcessData = InfoMap#{pid => Pid},
+                         [ProcessData | Acc] % Prepend to accumulator
+                  end
+              catch
+                  error:badarg -> % Process died (alternative way it fails)
+                      Acc;
+                  Type:Reason:Stacktrace -> % Log unexpected errors but continue
+                      io:format(standard_error, "Error getting process info for ~p: ~p:~p~nStacktrace: ~p~n", [Pid, Type, Reason, Stacktrace]),
+                      Acc
+              end
+      end, [], Pids).
 
 handle_call(get_session, _From, State) ->
         {reply, State#state.session, State};
 handle_call(stop, _From, State) ->
         trace:session_destroy(State#state.session),
         Tracers = State#state.tracers,
-        lists:foreach(fun(Pid) -> process_tracer:stop(Pid) end, maps:values(Tracers)),
+        trace_rotator:stop(),
         {stop, normal, State};
 handle_call(_Request, _From, State) ->
         {reply, ok, State}.
 
-
-pid_to_filename(Pid) when is_atom(Pid) ->
-        PidStr = case whereis(Pid) of
-                undefined -> <<"undefined">>;
-                ActualPid when is_pid(ActualPid) -> erlang:pid_to_list(ActualPid)
-        end,
-        CleanStr = string:replace(PidStr, "<", "", all),
-        string:replace(CleanStr, ">", "", all);
-        
-
-pid_to_filename(Pid) when is_pid(Pid) ->
-        PidStr = erlang:pid_to_list(Pid),
-        CleanStr = string:replace(PidStr, "<", "", all),
-        string:replace(CleanStr, ">", "", all).
-
-
-handle_cast({trace_msg, Msg}, #state{mode = pass1, dir = Dir} = State) ->
-        Pid = element(2, Msg),
-        Tracers = State#state.tracers,
-        case maps:get(Pid, Tracers, undefined) of
-                undefined ->
-                        %% TODO: if a new process appears but with the same pid as an old process that has exited, then we
-                        %% should get the process info and add a number to the pid {Pid, 1} to be able to distinguish it from the old process
-                        %% send will be a little bit trickier, since we need to keep track when the send was made in relation to the
-                        %% exit and start of the new process. During the first pass, we are able to make this distinction, and should tag the send
-                        %% with the correct TO pid,
-                        FileName = filename:join([Dir, pid_to_filename(Pid) ++ ".trace"]),
-                        {ok, File} = file:open(FileName, [append, binary]),
-                        Term = {Pid, process_info(Pid)},
-                        file:write_file(filename:join([Dir, "process_info"]), term_to_binary(Term), [append, binary]),
-                        file:write(File, term_to_binary(Msg)),
-                        {noreply, State#state{tracers = Tracers#{Pid => File}}};
-                File ->
-                        %% TODO: how can we make the second step aware on which line a receive happens?
-                        %%   we dont have json here, so line number is not valuable. We can have the 
-                        %%   post processing step upon handling the receive trace, wait until the corresponding
-                        %%   send happens and vice versa. Not sure if this can cause deadlocks, or make the postprocessing mostly sequential?
-                        %% TODO: if we have received an exit trace, we should stop the ProcessTracer
-                        %%   and remove it from the tracers map, currently the process_tracer stops itself, but the gen server is still
-                        %%   alive.
-                        file:write(File, term_to_binary(Msg)),
-                        {noreply, State}
-        end;
-handle_cast({trace_msg, Msg}, #state{mode = postprocess} = State) ->
-    %% Look up if a ProcessTracer already exists for Pid
-    Pid = element(2, Msg),
-    Tracers = State#state.tracers,
-    case maps:get(Pid, Tracers, undefined) of
-        undefined ->
-            %% No ProcessTracer exists; spawn a new one
-            %% TODO: process_tracer should be a postprocessing step, instead we should start a separate
-            %% tracer? or just output to a separate file, keep track on call chain
-            %% disable {return_trace} for this pid on this specific call,
-            {ok, ProcTracerPid} = process_tracer:start_link(Pid, State#state.dir),
-            NewTracers = Tracers#{Pid => ProcTracerPid},
-            %% Forward current trace message to the new ProcessTracer
-            process_tracer:trace(ProcTracerPid, {trace, Msg}),
-            {noreply, State#state{tracers = NewTracers}};
-        ProcTracerPid ->
-            %% Reuse existing ProcessTracer and forward the message
-            process_tracer:trace(ProcTracerPid, {trace, Msg}),
-            {noreply, State}
-    end;
+%% TODO: keep track on the call stack for each pid, if the same function exists in the same callstack more than 16 times
+%% then we want to disable return_trace from this particular function and output to a file that this function probably never returns
+%% some functions are actually tail recursive, and do return, but in those cases we just disable it anyways, to not run into
+%% out of stack issues, recursing over large data. In many cases you can derive the actual return value, by looking in the AST of the caller
+%% hopefully the value is used somehow in a succeeding call, or return.
+%% These functions that recurse over large data, producing several call traces, but only returns a return_to, should be possible
+%% to fold those so that stepping over them is easier
+handle_cast({trace_msg, Msg}, State) ->
+        trace_rotator:trace(Msg),
+        {noreply, State};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.

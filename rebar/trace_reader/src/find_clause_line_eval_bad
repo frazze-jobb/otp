@@ -1,0 +1,191 @@
+-module(find_clause_line_eval).
+-export([get_matching_clause_line/3]).
+
+%% @doc Finds the line number of the first clause using erl_eval, providing
+%%      record definitions directly via erl_eval:add_binding/3.
+%%      Handles complex/opaque arguments by binding them to variables.
+%% @param FilePath Full path to the .erl source file (string() or binary()).
+%% @param FunName The function name (atom()).
+%% @param Args The list of arguments the function would be called with.
+%% @returns {ok, LineNumber :: integer()} | {error, Reason :: term()}
+%%          (See previous version for Reason details)
+get_matching_clause_line(FilePath, FunName, Args) when is_list(Args) ->
+    Arity = length(Args),
+    % 1. Compile and get ALL AST Forms
+    case compile_and_extract_ast(FilePath) of
+        {ok, AllForms} ->
+             % 2. Find the function definition clauses in the AST
+             case find_function_clauses(AllForms, FunName, Arity) of
+                 {ok, Clauses} ->
+                     % 3. Convert Args to AST / Bindings
+                     erlang:display(Args),
+                     
+                    % case args_to_ast_tuple_with_bindings(Args) of
+                     %    {ok, ArgsAstTuple, _InitialVarBindings} -> % Bindings for vars/opaque args
+                             % 4. Extract record definition ASTs
+                      %       erlang:display({args_as_tuple, ArgsAstTuple}),
+                             Map = maps:from_list([ {Key, Value} || {Key, Value} <- lists:enumerate(0, Args) ]),
+                             InitialVarBindings = erl_eval:bindings(Map),
+                             erlang:display({initial_var_bindings, InitialVarBindings}),
+                             RecordDefAsts = extract_record_def_asts(AllForms),
+                             Recs = [{Name,D} || {attribute,_,_,{Name,_}}=D <- RecordDefAsts],
+                             Bs1 = record_bindings(Recs, InitialVarBindings),
+                             erlang:display({bindings_with_recs, Bs1}),
+                             Args2 = [ element(2, Arg) || Arg <- maps:to_list(Bs1)],
+                                {ok, ArgsAstTuple, _InitialVarBindings} = args_to_ast_tuple_with_bindings(Args2),
+                             erlang:display({args2, Args2}),
+                             % 5. Add record defs to bindings
+                             %case add_record_defs_to_bindings(RecordDefAsts, InitialVarBindings) of
+                             %   {ok, BindingsWithRecs} ->
+                                    % 6. Evaluate using a case expression with the final bindings
+                                    evaluate_case(Clauses, ArgsAstTuple, Bs1);
+                             %   {error, Reason} -> % Should not happen if AST is valid
+                             %        {error, {record_binding_error, Reason}}
+                             %end;
+                        %{error, Reason} ->
+                         %    {error, {arg_conversion_error, Reason}}
+                    % end;
+                 {error, Reason} ->
+                      {error, Reason} % Function not found
+             end;
+        {error, Reason} ->
+            {error, Reason} % Compilation or AST extraction error
+    end.
+record_bindings([], Bs) ->
+    Bs;
+record_bindings(Recs0, Bs0) ->
+    {Recs1, _} = lists:mapfoldl(fun ({Name,Def}, I) -> {{Name,I,Def},I+1}
+                                end, 0, Recs0),
+    Recs2 = lists:keysort(2, lists:ukeysort(1, Recs1)),
+    lists:foldl(fun ({Name,I,Def}, Bs) ->
+                        erl_eval:add_binding({record,I,Name}, Def, Bs)
+                end, Bs0, Recs2).
+expand_records([], E0) ->
+    E0;
+expand_records(UsedRecords, E0) ->
+    RecordDefs = [Def || {_Name,Def} <- UsedRecords],
+    A = erl_anno:new(1),
+    E = prep_rec(E0),
+    Forms0 = RecordDefs ++ [{function,A,foo,0,[{clause,A,[],[],[E]}]}],
+    Forms = erl_expand_records:module(Forms0, [strict_record_tests]),
+    {function,A,foo,0,[{clause,A,[],[],[NE]}]} = lists:last(Forms),
+    prep_rec(NE).
+
+prep_rec({value,_CommandN,_V}=Value) ->
+    %% erl_expand_records cannot handle the history expansion {value,_,_}.
+    {atom,Value,ok};
+prep_rec({atom,{value,_CommandN,_V}=Value,ok}) ->
+    %% Undo the effect of the previous clause...
+    Value;
+prep_rec(T) when is_tuple(T) -> list_to_tuple(prep_rec(tuple_to_list(T)));
+prep_rec([E | Es]) -> [prep_rec(E) | prep_rec(Es)];
+prep_rec(E) -> E.
+% --- Compile and Extract AST (No change needed) ---
+
+compile_and_extract_ast(FilePath) ->
+    CompileOpts = [binary, debug_info],
+    case compile:file(FilePath, CompileOpts) of
+        {ok, ModuleName, BeamBinary} -> extract_forms(BeamBinary, ModuleName);
+        {error, Errors, Warnings} -> {error, {compile_error, Errors, Warnings}};
+        error -> {error, {compile_error, "Unknown compilation error", []}}
+    end.
+
+extract_forms(BeamBinary, ModuleName) ->
+     case beam_lib:chunks(BeamBinary, [abstract_code]) of
+         {ok, {ModuleName, Chunks}} ->
+              case lists:keyfind(abstract_code, 1, Chunks) of
+                  {abstract_code, AbsCodeValue} ->
+                      Forms = case AbsCodeValue of {raw_abstract_v1, F} -> F; {abstract_v2, _, F} -> F; _ -> [] end,
+                      if Forms == [] -> {error, no_abstract_code}; true -> {ok, Forms} end;
+                  false -> {error, no_abstract_code}
+              end;
+         {error, Reason} -> {error, {beam_lib_error, Reason}}
+     end.
+
+% --- Find Function Clauses (No change) ---
+
+find_function_clauses(Forms, FunName, Arity) ->
+    TargetClauses = lists:filtermap(
+        fun({function, _, Func, Ar, Clauses}) when Func == FunName, Ar == Arity -> {true, Clauses}; (_) -> false end, Forms),
+    case TargetClauses of [Clauses | _] -> {ok, Clauses}; [] -> {error, {function_not_found, FunName, Arity}} end.
+
+% --- Extract Record Definition ASTs ---
+
+extract_record_def_asts(AllForms) ->
+    [ Form || {attribute, _, record, _} = Form <- AllForms ].
+
+% --- Add Record Defs to Bindings ---
+
+add_record_defs_to_bindings(RecordDefAsts, InitialBindings) ->
+    try
+        FinalBindings = lists:foldl(
+            fun({attribute, Line, record, {RecName, _Fields}} = DefAst, AccBindings) ->
+                 % Use the line number from the attribute as the 'Index'
+                 erl_eval:add_binding({record, Line, RecName}, DefAst, AccBindings);
+               % Handle potential variations if abstract code format differs slightly
+               (Other, AccBindings) ->
+                  io:format(standard_error, "Warning: Skipping unexpected form during record binding: ~p~n", [Other]),
+                  AccBindings
+            end,
+            InitialBindings,
+            RecordDefAsts
+        ),
+        {ok, FinalBindings}
+    catch
+        Type:Reason:Stacktrace ->
+            {error, {Type, Reason, Stacktrace}}
+    end.
+
+
+% --- Args to AST / Bindings Conversion (No change needed from previous version) ---
+
+args_to_ast_tuple_with_bindings(Args) ->
+    try
+        InitialAcc = {[], maps:new()},
+        {ArgAstsRev, BindingsMap} = lists:foldl(fun value_to_ast_bind/2, InitialAcc, Args),
+        InitialBindings = erl_eval:bindings(BindingsMap),
+        ArgsAstTuple = {tuple, 0, lists:reverse(ArgAstsRev)},
+        {ok, ArgsAstTuple, InitialBindings}
+    catch throw:{arg_conversion_error, Reason} -> {error, Reason}
+    end.
+
+value_to_ast_bind(V, {ArgAstListRev, BindingsMap}) ->
+    case V of
+        _ when is_atom(V); is_integer(V); is_float(V) -> {[value_to_ast_simple(V) | ArgAstListRev], BindingsMap};
+        [] -> {[{nil, 0} | ArgAstListRev], BindingsMap};
+        _ when is_list(V) -> case io_lib:printable_list(V) of true -> {[{string, 0, V} | ArgAstListRev], BindingsMap}; false -> {[list_to_cons_ast_simple(V) | ArgAstListRev], BindingsMap} end;
+        _ when is_tuple(V) -> {ElemAstsRev, NBM} = lists:foldl(fun value_to_ast_bind/2, {[], BindingsMap}, tuple_to_list(V)), TupleAst = {tuple, 0, lists:reverse(ElemAstsRev)}, {[TupleAst | ArgAstListRev], NBM};
+        _ when is_map(V) -> IMapAcc = {[], BindingsMap}, {AssocAstsRev, NBM} = maps:fold( fun(K, Val, {ARev, AccB}) -> {{KA, B1}, B1} = v2ab_sa(K, AccB), {{VA, B2}, B2} = v2ab_sa(Val, B1), AAst = {map_field_assoc, 0, KA, VA}, {[AAst | ARev], B2} end, IMapAcc, V), MapAst = {map, 0, lists:reverse(AssocAstsRev)}, {[MapAst | ArgAstListRev], NBM};
+        _ -> VarName = erlang:make_ref(), NBM = BindingsMap#{ VarName => V }, VarAst = {var, 0, VarName}, {[VarAst | ArgAstListRev], NBM}
+    end.
+v2ab_sa(V, BM) -> {{Ast, NBM}, NBM} = value_to_ast_bind(V, {[], BM}), {hd(Ast), NBM}. % standalone helper
+value_to_ast_simple(V) when is_atom(V) -> {atom, 0, V}; value_to_ast_simple(V) when is_integer(V) -> {integer, 0, V}; value_to_ast_simple(V) when is_float(V) -> {float, 0, V}; value_to_ast_simple([]) -> {nil, 0}; value_to_ast_simple(V) when is_list(V) -> case io_lib:printable_list(V) of true -> {string, 0, V}; false -> list_to_cons_ast_simple(V) end.
+list_to_cons_ast_simple([]) -> {nil, 0}; list_to_cons_ast_simple([H|T]) -> {cons, 0, value_to_ast_simple(H), list_to_cons_ast_simple(T)}.
+
+
+% --- Evaluate using Case Expression ---
+
+evaluate_case(Clauses, ArgsAstTuple, BindingsWithRecs) ->
+    % Modify clauses to return their line number upon successful match+guard
+    EvalClauses = [{clause, L, P, G, [{integer, L, L}]} || {clause, L, P, G, _B} <- Clauses],
+
+    % Build the case expression AST
+    CaseExpr = {'case', 0, ArgsAstTuple, EvalClauses},
+
+    try
+        % Use expr/2 as we only have one expression now (the case)
+        erl_eval:expr(CaseExpr, BindingsWithRecs) of
+            {value, LineNumber, _FinalBindings} when is_integer(LineNumber) ->
+                % The case expression evaluated successfully and returned the line number
+                {ok, LineNumber};
+            Other ->
+                 % Should not happen if CaseExpr returns line number
+                 {error, {unexpected_eval_result, Other}}
+    catch
+        % Specifically catch case_clause errors for no match in the CaseExpr
+        error:{case_clause, _FailedValue}:_Stacktrace ->
+             {error, no_clause_matched};
+        % Catch other evaluation errors
+        ExceptionType:Reason:Stacktrace ->
+             {error, {eval_exception, ExceptionType, Reason, Stacktrace}}
+    end.
