@@ -1334,6 +1334,19 @@ add_records(RAs, Bs0, RT) ->
             exit(lists:flatten(ErrStr));
         ok ->
             true = ets:insert(RT, Recs),
+
+            % Attempt to get the user_functions ETS table.
+            % If it exists, insert the record definitions using the specified key structure.
+            case ets:whereis(user_functions) of
+                undefined ->
+                    ok; % user_functions table doesn't exist, do nothing further with it
+                FT_Table_Id when is_pid(FT_Table_Id) -> % Check if it's a valid table identifier
+                    FT_Recs = [{{type, Name}, Def} || {Name, Def} <- Recs],
+                    true = ets:insert(FT_Table_Id, FT_Recs);
+                _ -> % Not a pid, table might be protected or some other non-standard case
+                    ok 
+            end,
+
             lists:usort([Name || {Name,_} <- Recs])
     end.
 
