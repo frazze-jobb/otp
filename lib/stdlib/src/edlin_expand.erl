@@ -253,13 +253,13 @@ expand_map(Word, Bs, Binding, Keys) ->
         Map when is_map(Map) ->
             K1 = sets:from_list(maps:keys(Map)),
             K2 = sets:subtract(K1, sets:from_list([list_to_atom(K) || K <- Keys])),
-            match(Word, sets:to_list(K2), "=>");
+            match(Word, lists:map(fun(X)-> {flat_write(X), []} end, sets:to_list(K2)), "=>");
         _ -> {no, [], []}
     end.
 
 -doc false.
 over_word(Bef) ->
-    {Bef1,_,_} = over_white(Bef, [], 0),
+    {Bef1,_,_} = over_white(Bef, [],0),
     {Bef2, Word, _} = edlin:over_word(Bef1, [], 0),
     {Bef2, Word}.
 
