@@ -203,7 +203,8 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                     end;
 
                  %% Complete an unfinished key or suggest valid keys of a map binding
-                 {map, Binding, Keys} -> expand_map(Word, Bs, Binding, Keys);
+                 %% TODO: create a custom type from looking at the existing keys in the map, 
+                 {map, Binding, Keys, CurrentField, _Args, _Unfinished, _Nestings} -> expand_map(CurrentField, Bs, Binding, Keys, _Nestings);
 
                  {map_or_record} ->
                      {[$#|Bef2], _} = over_word(Bef0),
@@ -246,14 +247,29 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
         true -> {Res, Expansion, to_legacy_format(Matches1)};
         false -> {Res, Expansion, Matches1}
     end.
-expand_map(_, [], _, _) ->
+expand_map(_, [], _, _, _) ->
     {no, [], []};
-expand_map(Word, Bs, Binding, Keys) ->
+expand_map(Word, Bs, Binding, _Keys, Nestings) ->
     case proplists:get_value(list_to_atom(Binding), Bs) of
         Map when is_map(Map) ->
-            K1 = sets:from_list(maps:keys(Map)),
-            K2 = sets:subtract(K1, sets:from_list([list_to_atom(K) || K <- Keys])),
-            match(Word, lists:map(fun(X)-> {flat_write(X), []} end, sets:to_list(K2)), "=>");
+            Type = edlin_type_suggestion:create_type_tree(Map),
+            T = edlin_type_suggestion:type_tree(erlang, Type, Nestings, []),
+            Types = edlin_type_suggestion:get_types([], T, Nestings),
+            case Nestings of
+                [] ->
+                    Atoms = edlin_type_suggestion:get_atoms([], T, Nestings),
+                    case {Word, match(Word, Atoms, ", ")} of
+                        {[],{_Res,_Expansion,_}} -> {_Res, _Expansion, [#{title=>"types", elems=>Types, options=>[{hide, title}]}]};
+                        {_,{_Res,_Expansion,[]}=M} -> M;
+                        {_,{Res,Expansion,Matches}} -> {Res, Expansion, [#{title=>"matches", elems=>Matches, options=>[highlight_all]}]}
+                    end;
+                _ ->
+                    expand_nesting_content(T, [], Nestings, #{title=>"types", elems=>Types, options=>[{hide, title}]})
+            end;
+            %erlang:display
+            %K1 = sets:from_list(lists:map(fun(X)->lists:flatten(io_lib:fwrite("~p",[X]))end, maps:keys(Map))),
+            %K2 = sets:subtract(K1, sets:from_list([list_to_atom(K) || K <- Keys])),
+            %match(Word, lists:map(fun(X)-> {flat_write(X), []} end, sets:to_list(K2)), "=>");
         _ -> {no, [], []}
     end.
 

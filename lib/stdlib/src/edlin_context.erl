@@ -153,7 +153,7 @@ get_context([${|Bef], #context{ fields=Fields,
                 [] -> get_context(Bef2, #context{
                                            %% We finished a nesting lets reset and read the next nesting
                                            nestings = [{'map', Fields, FieldToComplete, Args, Unfinished}|Nestings]});
-                _ -> {map, Map, Fields}
+                _ -> {map, Map, Fields, FieldToComplete, Args, Unfinished, Nestings}
             end;
         {_, []} ->
             get_context(Bef, #context{

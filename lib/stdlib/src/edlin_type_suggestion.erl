@@ -20,7 +20,7 @@
 -module(edlin_type_suggestion).
 -moduledoc false.
 -include_lib("kernel/include/eep48.hrl").
--export([type_tree/4, get_arity/3, get_atoms/3, get_types/3, get_types/4, get_function_type/4, print_type/3]).
+-export([type_tree/4, create_type_tree/1, get_arity/3, get_atoms/3, get_types/3, get_types/4, get_function_type/4, print_type/3]).
 
 
 %% type_tree/4 returns a unwrapped and trimmed type specification containing
@@ -208,6 +208,24 @@ type_traverser(_, {type, _, Name, Params}=T, Visited, Level, FT) ->
 
 strip_anno({A, _, B}) -> {A, B};
 strip_anno({A, _, B, C}) -> {A, B, C}.
+
+create_type_tree(Map) when is_map(Map) ->
+    Keys = maps:keys(Map),
+    case Keys of
+        [] -> {type, 0, map, any};
+        _ ->
+            Params = lists:map(fun(X) -> {type, 0, map_field_assoc, [create_type_tree(X), create_type_tree(maps:get(X, Map))]} end, Keys),
+            {type, 0, map, Params}
+    end;
+create_type_tree(Tuple) when is_tuple(Tuple) ->
+    Params = lists:map(fun(X) -> create_type_tree(X) end, tuple_to_list(Tuple)),
+    {type, 0, tuple, Params};
+create_type_tree(List) when is_list(List) ->
+    Params = lists:map(fun(X) -> create_type_tree(X) end, List),
+    {type, 0, list, Params};
+create_type_tree(_) ->
+    {type, 0, term}.
+
 
 simplified_type(erlang, binary, 0) -> {type, undefined, binary, []};
 simplified_type(erlang, char, 0) -> {type, undefined, char, []};
