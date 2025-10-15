@@ -793,7 +793,7 @@ set_path(NewPath, OldPath, Control, NameDb, Root) ->
 %% an O(1) lookup.
 create_namedb(Path, Root) ->
     Db = ets:new(code_names,[]),
-    init_namedb(lists:reverse(Path), Db),
+    init_namedb(lists:reverse([P || {D, _} = P <- Path, D /= "."]), Db),
 
     case lookup_name("erts", Db) of
         {ok, _, _, _} ->
