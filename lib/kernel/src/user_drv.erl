@@ -99,7 +99,7 @@
         new_prompt.
 
 -export_type([message/0, request/0]).
--export([start/0, start/1, start_shell/0, start_shell/1, whereis_group/0]).
+-export([start/0, start/1, start_shell/0, start_shell/1, whereis_group/0, flush/0]).
 
 %% gen_statem state callbacks
 -behaviour(gen_statem).
@@ -257,6 +257,14 @@ exit_on_remote_shell_error(RemoteNode, {M, _, _}, {error, Reason}) ->
     erlang:halt(1);
 exit_on_remote_shell_error(_, _, Result) ->
     Result.
+
+-spec flush() -> ok | {error, term()}.
+flush() ->
+    try
+        gen_statem:call(?MODULE, flush, 1000)
+    catch
+        _:_ -> ok
+    end.
 
 %% We have been started with -noshell. In this mode the current_group is
 %% the `user` group process.

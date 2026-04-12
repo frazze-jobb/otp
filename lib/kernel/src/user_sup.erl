@@ -93,7 +93,8 @@ relay1(Pid) ->
 -spec terminate(term(), pid()) -> 'ok'.
 
 terminate(_Reason, UserPid) ->
-    receive after 1000 -> ok end,
+    %%_ = user_drv:flush(),
+    %% receive after 1000 -> true end,
     exit(UserPid, kill),
     ok.
 
