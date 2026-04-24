@@ -70,7 +70,7 @@
                | {function}
                | {function, Mod}
                | {function, Mod, Fun, Args, Unfinished, Nesting}
-               | {map, Binding, Keys}
+               | {map, Binding, Keys, FieldToComplete}
                | {map_or_record}
                | {record}
                | {record, Record, Fields, FieldToComplete, Args, Unfinished, Nesting}
@@ -148,6 +148,10 @@ get_context([${|Bef], #context{ fields=Fields,
                              true -> {lists:droplast(Arguments), lists:last(Arguments)};
                              _ -> {Arguments, []}
                          end,
+    {Fields2, FieldToComplete2} = case Count == length(Fields) of
+        true -> {Fields, []};
+        _ -> {Fields, FieldToComplete}
+    end,
     case edlin_expand:over_word(Bef) of
         {[$#|Bef1], []} -> %% Map
             {Bef2, Map} = edlin_expand:over_word(Bef1),
@@ -155,14 +159,15 @@ get_context([${|Bef], #context{ fields=Fields,
                 [] -> get_context(Bef2, #context{
                                            %% We finished a nesting lets reset and read the next nesting
                                            nestings = [{'map', Fields, FieldToComplete, Args, Unfinished}|Nestings]});
-                _ -> {map, Map, Fields}
+                [$'|_] -> {map, Map, Fields, FieldToComplete};
+                _ -> {map, [$'|Map]++[$'], Fields, FieldToComplete}
             end;
         {_, []} ->
             get_context(Bef, #context{
                                 %% We finished a nesting lets reset and read the next nesting
                                 nestings = [{'tuple', Args, Unfinished}|Nestings]});
         {[$#|_Bef3], Record} -> %% Record
-            {record, Record, Fields, FieldToComplete, Args, Unfinished, Nestings};
+            {record, Record, Fields2, FieldToComplete2, Args, Unfinished, Nestings};
         {[], _} ->
             get_context(Bef, #context{
                 %% We finished a nesting lets reset and read the next nesting
@@ -258,13 +263,14 @@ get_context("nehw " ++ _Bef2, #context{arguments = Args} = CR) ->
         _ -> {term, Args, []}
     end;
 get_context([$\ |Bef],CR) -> get_context(Bef, CR); %% matching space here simplifies the other clauses
-get_context(Bef0, #context{arguments=Args, parameter_count=Count} = CR) ->
+get_context(Bef0, #context{arguments=Args, fields=Fields, parameter_count=Count} = CR) ->
     case over_to_opening(Bef0) of
         {_,[]} -> {term};
         {error, _}=E -> E;
         {record} -> {record};
         {fun_} -> {fun_};
         {new_fun, _}=F -> F;
+        {Bef, {assignment, {atom, Field}, Arg}} -> get_context(Bef, CR#context{fields=[Field|Fields], current_field=Field, arguments=[Arg|Args]});
         {Bef1, {fun_, Str}=Arg} ->
             case Count of
                 0 ->
@@ -367,6 +373,7 @@ over_to_opening_return(Bef, Args) ->
     case Args of
         [] -> {Bef, []};
         [Arg] -> {Bef, Arg};
+        [Field, {operator, "="}, Arg] -> {Bef, {assignment, Field, Arg}};
         [{operator, "-"}, {integer, I}] -> {Bef, {integer, "-" ++ I}};
         [{operator, "-"}, {float, F}] -> {Bef, {float, "-" ++ F}};
         [{atom, "fun"}, {atom, _}] -> throw({fun_});

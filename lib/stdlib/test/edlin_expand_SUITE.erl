@@ -201,10 +201,10 @@ record_completion(_Config) ->
               {"{atom3, ...}",[]}],
              options:=[{hide,title}]}]} = do_expand("#a_record{a_field="),
     %% test that an already specified field does not get suggested again
+    {no,[],[]} = do_expand("#a_record{a_field={atom3,b}"),
     {no,[],
     [#{title:="fields", elems:=
-              [{"a_field",[{ending,"="}]},
-               {"b_field",[{ending,"="}]},
+              [{"b_field",[{ending,"="}]},
                {"c_field",[{ending,"="}]},
                {"d_field",[{ending,"="}]}],
               options:=[highlight_all]}]} = do_expand("#a_record{a_field={atom3,b},"),
@@ -425,9 +425,9 @@ get_coverage(Config) ->
                     title := "erlang:my_type()"}],
             options := [{hide,title}],
             title := "types"}]} =
-        do_expand("my_func(#my_record{ field=>"),
+        do_expand("my_func(#my_record{ field="),
     {yes,"ue, ",[]} =
-        do_expand("my_func(#my_record{field=>a_val"),
+        do_expand("my_func(#my_record{field=a_val"),
     %% bifs()
     {yes, "st(", _} =
         do_expand("integer_to_li"),

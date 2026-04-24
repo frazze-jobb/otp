@@ -318,7 +318,7 @@ get_arity1({map, Types}, Constraints, [{'map', Keys, [], _, _}|Nestings]) ->
                       {_, Key, _}=T <- Types,
                       not lists:member(catch atom_to_list(Key), Keys)]);
 get_arity1({map, Types}, Constraints, [{'map', _Keys, Key, _, _}|Nestings]) ->
-    case [V || {_, K, V} <- Types, K =:= list_to_atom(Key)] of
+    case [V || {_, K, V} <- Types, is_atom(K), atom_to_list(K) =:= Key] of
         [] -> none;
         [Type] -> get_arity1(Type, Constraints, Nestings)
     end;
@@ -359,7 +359,7 @@ get_atoms1({map, Types}, Constraints, [{'map', Keys, [], _, _}|Nestings]) ->
                       {_, Key, _}=T <- Types,
                       not lists:member(catch atom_to_list(Key), Keys)]);
 get_atoms1({map, Types}, Constraints, [{'map', _Keys, Key, _, _}|Nestings]) ->
-    case [V || {_, K, V} <- Types, K =:= list_to_atom(Key)] of
+    case [V || {_, K, V} <- Types, is_atom(K), atom_to_list(K) =:= Key] of
         [] -> [];
         [Type] -> get_atoms1(Type, Constraints, Nestings)
     end;
@@ -405,7 +405,7 @@ get_types1({'map', Types}, Cs, [{'map', Keys, [], _Args, _}|Nestings], MaxUserTy
     lists:flatten([get_types1(T, Cs, Nestings, MaxUserTypeExpansions, Options) ||
                       {_, Key, _}=T <- Types, not lists:member(catch atom_to_list(Key), Keys)]);
 get_types1({'map', Types}, Cs, [{'map', _, Key, _Args, _}|Nestings], MaxUserTypeExpansions, Options) ->
-    case [V || {_, K, V} <- Types, K =:= list_to_atom(Key)] of
+    case [V || {_, K, V} <- Types, is_atom(K), atom_to_list(K) =:= Key] of
         [] -> [];
         [Type] -> get_types1(Type, Cs, Nestings, MaxUserTypeExpansions, Options)
     end;

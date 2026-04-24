@@ -165,8 +165,9 @@ expand(Bef0, Opts) ->
 
 %% Only used for testing
 -doc false.
-expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
+expand(Bef0, Opts, #shell_state{bindings = BsAtoms, records = RT, functions = FT}) ->
     LegacyOutput = proplists:get_value(legacy_output, Opts, false),
+    Bs = [{flat_write(B),V} || {B,V} <- BsAtoms],
     {_Bef1, Word} = over_word(Bef0),
     {Res, Expansion, Matches} = case edlin_context:get_context(Bef0) of
 
@@ -209,7 +210,7 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                     end;
 
                  %% Complete an unfinished key or suggest valid keys of a map binding
-                 {map, Binding, Keys} -> expand_map(Word, Bs, Binding, Keys);
+                 {map, Binding, Keys, FieldToComplete} -> expand_map(Word, Bs, Binding, Keys, FieldToComplete);
 
                  {map_or_record} ->
                      {[$#|Bef2], _} = over_word(Bef0),
@@ -217,7 +218,7 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
                      case Bs of
                          [] -> expand_record(Word, RT);
                          _ ->
-                             case proplists:get_value(list_to_atom(Var), Bs) of
+                             case proplists:get_value(Var, Bs) of
                                  undefined ->
                                      expand_record(Word, RT);
                                  Map when is_map(Map) -> {yes, "{", []};
@@ -252,17 +253,18 @@ expand(Bef0, Opts, #shell_state{bindings = Bs, records = RT, functions = FT}) ->
         true -> {Res, Expansion, to_legacy_format(Matches1)};
         false -> {Res, Expansion, Matches1}
     end.
-expand_map(_, [], _, _) ->
+expand_map(_, [], _, _, _) ->
     {no, [], []};
-expand_map(Word, Bs, Binding, Keys) ->
-    case proplists:get_value(list_to_atom(Binding), Bs) of
+expand_map(Word, Bs, Binding, Keys, []) ->
+    case proplists:get_value(Binding, Bs) of
         Map when is_map(Map) ->
-            K1 = sets:from_list([Key || Key <- maps:keys(Map), is_atom(Key)]),
-            K2 = sets:subtract(K1, sets:from_list([list_to_atom(K) || K <- Keys])),
+            K1 = sets:from_list([flat_write(Key) || Key <- maps:keys(Map), is_atom(Key)]),
+            K2 = sets:subtract(K1, sets:from_list([K || K <- Keys])),
             match(Word, sets:to_list(K2), "=>");
         _ -> {no, [], []}
-    end.
-
+    end;
+expand_map(_, _, _, _, _) ->
+    {no, [], []}.
 -doc false.
 over_word(Bef) ->
     {Bef1,_,_} = over_white(Bef, [], 0),
@@ -285,20 +287,20 @@ expand_record(Prefix, RT) ->
     end.
 
 expand_record_fields(FieldToComplete, Word, Record, Fields, RT, _Args, Nestings, FT) ->
-    Record2 = list_to_atom(Record),
-    FieldSet2 = sets:from_list([list_to_atom(F) || F <- Fields]),
-    FieldToComplete2 = list_to_atom(FieldToComplete),
+    Record2 = flat_write(Record),
+    FieldSet2 = sets:from_list([flat_write(F) || F <- Fields]),
+    FieldToComplete2 = flat_write(FieldToComplete),
     Word1 = case Word of
                 {_, Word2} -> Word2;
                 [] -> []
             end,
-    case [RecordSpec || {Record3, RecordSpec} <- RT, Record2 =:= Record3] of
+    case [RecordSpec || {Record3, RecordSpec} <- RT, Record2 =:= flat_write(Record3)] of
         [RecordType|_] ->
             case sets:is_element(FieldToComplete2, FieldSet2) of
                 true ->
                     expand_record_field_content(FieldToComplete2, RecordType, Word1, Nestings, FT);
                 false ->
-                    expand_record_field_name(Record2, FieldSet2, RecordType, Word1)
+                    expand_record_field_name(list_to_atom(Record2), FieldSet2, RecordType, Word1)
             end;
         _ ->
             {no, [], []}
@@ -317,8 +319,8 @@ expand_record_field_name(Record, Fields, RecordType, Word) ->
 expand_record_field_content(Field,
                             {attribute, _, record,
                              {_Record, FieldTypes}}, Word, Nestings, FT) ->
-    FieldTypesFiltered = [Type1 || {typed_record_field, {record_field, _, {_,_, F}}, Type1} <- FieldTypes, F == Field] ++
-        [Type1 || {typed_record_field, {record_field, _, {_,_, F}, _}, Type1} <- FieldTypes, F == Field],
+    FieldTypesFiltered = [Type1 || {typed_record_field, {record_field, _, {_,_, F}}, Type1} <- FieldTypes, flat_write(F) == Field] ++
+        [Type1 || {typed_record_field, {record_field, _, {_,_, F}, _}, Type1} <- FieldTypes, flat_write(F) == Field],
     case FieldTypesFiltered of
         [] -> {no, [], []};
         [Type] ->
@@ -326,7 +328,7 @@ expand_record_field_content(Field,
             Types = edlin_type_suggestion:get_types([], T, Nestings),
             case Nestings of
                 [] ->
-                    Atoms = edlin_type_suggestion:get_atoms([], T, Nestings),
+                    Atoms = edlin_type_suggestion:get_atoms([], T, []),
                     case {Word, match(Word, Atoms, ", ")} of
                         {[],{_Res,_Expansion,_}} -> {_Res, _Expansion, [#{title=>"types", elems=>Types, options=>[{hide, title}]}]};
                         {_,{_Res,_Expansion,[]}=M} -> M;
@@ -496,8 +498,10 @@ expand_function_parameter_type(Mod, MFA, FunType, Args, Unfinished, Nestings, FT
             Parameter = lists:nth(length(Args)+1, Parameters),
             {T, _Name} = case Parameter of
                             Atom when is_atom(Atom) -> {Atom, atom_to_list(Atom)};
-                            {var, Name1}=T1 -> {T1, atom_to_list(Name1)};
-                            {ann_type, {var, Name1}, T1} -> {T1, atom_to_list(Name1)};
+                            {var, Name1}=T1 when is_atom(Name1) -> {T1, atom_to_list(Name1)};
+                            {var, Name1}=T1 -> {T1, Name1};
+                            {ann_type, {var, Name1}, T1} when is_atom(Name1) -> {T1, atom_to_list(Name1)};
+                            {ann_type, {var, Name1}, T1} -> {T1, Name1};
                             T1 -> {T1, edlin_type_suggestion:print_type(T1, [], [{first_only, true}])}
                         end,
             Ts = edlin_type_suggestion:get_types(Constraints1, T, Nestings),
@@ -631,8 +635,8 @@ expand_nesting_content(T, Constraints, Nestings, Section) ->
             {Res, Expansion, Match1}
     end.
 
-extract_record_fields(Record, {attribute,_,record,{Record, Fields}})->
-    [X || X <- [extract_record_field(F) || F <- Fields], X /= []];
+extract_record_fields(Record, {attribute,_,record,{Record, Fields}}) ->
+    [flat_write(X) || X <- [extract_record_field(F) || F <- Fields], X /= []];
 extract_record_fields(_, _)-> error.
 extract_record_field({typed_record_field, {_, _,{atom, _, Field}},_})->
     Field;
@@ -796,8 +800,10 @@ print_function_head1(Mod, Fun, Par, _Ret) ->
     Mod++":"++Fun++"("++lists:join(", ",
                                    [case P of
                                         Atom when is_atom(Atom) -> atom_to_list(Atom);
-                                        {var, V} -> atom_to_list(V);
-                                        {ann_type, {var, V}, _T} -> atom_to_list(V);
+                                        {var, V} when is_atom(V) -> atom_to_list(V);
+                                        {var, V} -> V;
+                                        {ann_type, {var, V}, _T} when is_atom(V) -> atom_to_list(V);
+                                        {ann_type, {var, V}, _T} -> V;
                                         T -> edlin_type_suggestion:print_type(T, [], [{first_only, true}])
                                     end || {_N,P} <- lists:enumerate(Par)])++")".
 print_function_head_from_type(Mod, Fun, FunType, FT) ->
@@ -914,7 +920,7 @@ expand_user_defined_functions(FT, Prefix) ->
 expand_module_name("",_) ->
     {no, [], []};
 expand_module_name(Prefix,CC) ->
-    Alts = [{list_to_atom(M),""} || {M,_,_} <- code:all_available()],
+    Alts = [list_to_atom(M) || {M,_,_} <- code:all_available()],
     case match(Prefix, Alts, CC) of
         {_Res,_Expansion,[]}=M -> M;
         {Res,Expansion, Matches} -> {Res,Expansion,[#{title=>"modules", elems=>Matches, options=>[highlight_all]}]}
@@ -1010,8 +1016,11 @@ to_atom(Str) ->
 to_list(Atom) ->
     io_lib:write_atom(Atom).
 
-strip_quotes(Atom) ->
-    [C || C<-atom_to_list(Atom), C/=$'].
+strip_quotes(Atom) when is_atom(Atom) ->
+    [C || C<-atom_to_list(Atom), C/=$'];
+
+strip_quotes(List) ->
+    [C || C <- List, C/=$'].
 
 match_preprocess_alt({_,_}=Alt) -> Alt;
 match_preprocess_alt(X) -> {X, ""}.
